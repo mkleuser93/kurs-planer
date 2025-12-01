@@ -6,6 +6,7 @@ import itertools
 # --- KONFIGURATION ---
 st.set_page_config(page_title="MyCareer Planer", page_icon="📅")
 
+# Abhängigkeiten definieren
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1",
@@ -34,12 +35,10 @@ for kat, module in KATEGORIEN_MAPPING.items():
 
 PRAXIS_MODUL = "2wo_PMPX"
 
-# --- FUNKTIONEN (Angepasst für Streamlit) ---
+# --- FUNKTIONEN ---
 
 def finde_naechsten_start(df, modul_kuerzel, ab_datum):
-    # Sicherstellen, dass wir Timestamp nutzen
     ab_datum = pd.to_datetime(ab_datum)
-    
     moegliche_termine = df[
         (df['Kuerzel'] == modul_kuerzel) & 
         (df['Startdatum'] >= ab_datum)
@@ -63,7 +62,6 @@ def berechne_kategorie_wechsel(plan):
 
 def berechne_plan(df, modul_reihenfolge, start_wunsch):
     plan = []
-    # Startdatum in Timestamp wandeln für Vergleich mit Pandas
     naechster_moeglicher_start = pd.to_datetime(start_wunsch)
     total_gap_days = 0
     moeglich = True
@@ -120,14 +118,31 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch):
     return moeglich, total_gap_days, plan, fehler_grund
 
 def ist_reihenfolge_gueltig(reihenfolge):
+    """
+    Prüft die zeitliche Logik.
+    Erlaubt fehlende Voraussetzungen (das wird separat geprüft),
+    aber WENN beide da sind, muss die Reihenfolge stimmen.
+    """
     gesehene_module = set()
     for modul in reihenfolge:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
+            # Nur prüfen, wenn die Voraussetzung auch im aktuellen Plan ist
             if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
                 return False
         gesehene_module.add(modul)
     return True
+
+def check_fehlende_voraussetzungen(gewuenschte_module):
+    fehler_liste = []
+    auswahl_set = set(gewuenschte_module)
+    
+    for modul in gewuenschte_module:
+        voraussetzung = ABHAENGIGKEITEN.get(modul)
+        if voraussetzung:
+            if voraussetzung not in auswahl_set:
+                fehler_liste.append(f"Modul '{modul}' benötigt normalerweise '{voraussetzung}'")
+    return fehler_liste
 
 def bewertung_sortierung(plan_info):
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] != "SELBSTLERN"]
@@ -151,7 +166,6 @@ if uploaded_file:
         else:
             df = pd.read_excel(uploaded_file)
             
-        # Datenbereinigung
         df.columns = [c.strip() for c in df.columns]
         df['Startdatum'] = pd.to_datetime(df['Startdatum'], dayfirst=True)
         df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
@@ -159,7 +173,6 @@ if uploaded_file:
         
         verfuegbare_module = sorted(df['Kuerzel'].unique())
         
-        # Eingabemaske
         col1, col2 = st.columns(2)
         with col1:
             start_datum = st.date_input("Startdatum", date(2026, 2, 9))
@@ -167,15 +180,35 @@ if uploaded_file:
         with col2:
             gewuenschte_module = st.multiselect("Wähle die Module aus:", verfuegbare_module)
 
+        st.markdown("---")
+        
+        # Die neue Checkbox für Sonderfälle
+        ignore_deps = st.checkbox("⚠️ Abhängigkeiten ignorieren (z.B. bei bestandenem Einstufungstest)")
+
         if st.button("Angebot berechnen"):
             if not gewuenschte_module:
                 st.warning("Bitte wähle mindestens ein Modul aus.")
             else:
+                # 1. Check auf fehlende Voraussetzungen
+                fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
+                
+                # ABBRUCHBEDINGUNG: Fehler gefunden UND Checkbox NICHT gesetzt
+                if fehlende_voraussetzungen and not ignore_deps:
+                    st.error("❌ Berechnung gestoppt: Fehlende Voraussetzungen!")
+                    for fehler in fehlende_voraussetzungen:
+                        st.write(f"- {fehler}")
+                    st.warning("👉 Wenn der Teilnehmer einen Test bestanden hat, setze bitte den Haken bei 'Abhängigkeiten ignorieren' (oberhalb dieses Buttons).")
+                    st.stop()
+                
+                # WARNUNG: Fehler gefunden ABER Checkbox gesetzt -> Wir machen weiter
+                if fehlende_voraussetzungen and ignore_deps:
+                    st.warning(f"Achtung: Folgende Abhängigkeiten werden ignoriert: {', '.join(fehlende_voraussetzungen)}")
+
+                # 2. Berechnung
                 with st.spinner("Berechne beste Kombination..."):
                     gueltige_plaene = []
                     letzter_fehler = ""
                     
-                    # Berechnung
                     for reihenfolge in itertools.permutations(gewuenschte_module):
                         if not ist_reihenfolge_gueltig(reihenfolge): continue
                         
@@ -187,17 +220,15 @@ if uploaded_file:
                         else:
                             letzter_fehler = fehler
                     
-                    # Ergebnis
                     if not gueltige_plaene:
-                        st.error("Kein Plan möglich!")
-                        st.info(f"Grund: {letzter_fehler}")
+                        st.error("Kein zeitlich passender Plan möglich!")
+                        st.info(f"Häufigster Grund: {letzter_fehler}")
                     else:
                         gueltige_plaene.sort(key=bewertung_sortierung)
                         bester = gueltige_plaene[0]
                         
                         st.success(f"Bestes Angebot gefunden! (Ungedeckte Lückentage: {bester['gaps']})")
                         
-                        # Schönere Darstellung als Tabelle
                         display_data = []
                         for item in bester['plan']:
                             start_str = item['Start'].strftime('%d.%m.%Y')
@@ -218,7 +249,6 @@ if uploaded_file:
                         
                         st.table(display_data)
                         
-                        # Copy Paste String
                         kuerzel_only = [x['Kuerzel'] for x in bester['plan'] if x['Kuerzel'] != "SELBSTLERN"]
                         st.text_area("Kompakte Reihenfolge (für E-Mail/Word):", " -> ".join(kuerzel_only))
 
