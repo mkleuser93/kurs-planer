@@ -4,7 +4,8 @@ from datetime import timedelta, date
 import itertools
 
 # --- KONFIGURATION ---
-st.set_page_config(page_title="MyCareer Planer", page_icon="📅")
+# Hier wurde der Titel angepasst:
+st.set_page_config(page_title="mycareernow Planer", page_icon="📅")
 
 # Abhängigkeiten definieren
 ABHAENGIGKEITEN = {
@@ -148,7 +149,8 @@ def bewertung_sortierung(plan_info):
 
 # --- UI LOGIK ---
 
-st.title("🎓 MyCareer Angebots-Generator")
+# Hier wurde der Titel angepasst:
+st.title("🎓 mycareernow Angebots-Generator")
 st.write("Lade die Excel-Liste hoch und wähle die Module aus.")
 
 uploaded_file = st.file_uploader("Kursdaten (Excel) hochladen", type=["xlsx", "csv"])
