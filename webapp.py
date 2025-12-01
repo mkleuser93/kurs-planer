@@ -218,4 +218,107 @@ if uploaded_file:
         with col1:
             # Hinweis für den User
             st.info("ℹ️ Das Datum unten ist der Start des ERSTEN Fachmoduls. B4.0 startet automatisch 3 Tage früher.")
-            start_datum = st.date_input("Gew
+            start_datum = st.date_input("Gewünschter Start Fachmodul", date(2026, 2, 9))
+        
+        with col2:
+            gewuenschte_module = st.multiselect("Wähle die Fachmodule aus:", verfuegbare_module)
+
+        st.markdown("---")
+        
+        # Checkboxen nebeneinander
+        c1, c2 = st.columns(2)
+        with c1:
+            skip_b40 = st.checkbox("B4.0 überspringen (Wiederkehrer)")
+        with c2:
+            ignore_deps = st.checkbox("⚠️ Abhängigkeiten ignorieren (Test bestanden)")
+
+        if st.button("Angebot berechnen"):
+            if not gewuenschte_module:
+                st.warning("Bitte wähle mindestens ein Fachmodul aus.")
+            else:
+                # Voraussetzungs-Check
+                fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
+                
+                if fehlende_voraussetzungen and not ignore_deps:
+                    st.error("❌ Berechnung gestoppt: Fehlende Voraussetzungen!")
+                    for fehler in fehlende_voraussetzungen:
+                        st.write(f"- {fehler}")
+                    st.stop()
+                
+                if fehlende_voraussetzungen and ignore_deps:
+                    st.warning(f"Ignoriere Abhängigkeiten: {', '.join(fehlende_voraussetzungen)}")
+
+                with st.spinner("Berechne beste Kombination..."):
+                    gueltige_plaene = []
+                    letzter_fehler = ""
+                    
+                    # Permutationen berechnen
+                    for reihenfolge in itertools.permutations(gewuenschte_module):
+                        if not ist_reihenfolge_gueltig(reihenfolge): continue
+                        
+                        # Hier übergeben wir, ob B4.0 aktiv sein soll (True wenn NICHT übersprungen)
+                        b40_aktiv = not skip_b40
+                        
+                        moeglich, gaps, plan, fehler = berechne_plan(df, reihenfolge, pd.to_datetime(start_datum), b40_aktiv)
+                        
+                        if moeglich:
+                            switches = berechne_kategorie_wechsel(plan)
+                            gueltige_plaene.append({"gaps": gaps, "switches": switches, "plan": plan})
+                        else:
+                            letzter_fehler = fehler
+                    
+                    if not gueltige_plaene:
+                        st.error("Kein Plan möglich!")
+                        st.info(f"Grund: {letzter_fehler}")
+                    else:
+                        gueltige_plaene.sort(key=bewertung_sortierung)
+                        bester = gueltige_plaene[0]
+                        
+                        gesamt_start = bester['plan'][0]['Start']
+                        gesamt_ende = bester['plan'][-1]['Ende']
+                        
+                        st.success(f"Angebot erstellt! (Starttermin B4.0: {gesamt_start.strftime('%d.%m.%Y')})")
+                        
+                        display_data = []
+                        for item in bester['plan']:
+                            start_str = item['Start'].strftime('%d.%m.%Y')
+                            ende_str = item['Ende'].strftime('%d.%m.%Y')
+                            hinweis = ""
+                            if item['Kuerzel'] == "SELBSTLERN":
+                                hinweis = "🔹 Lückenfüller"
+                            elif item['Kuerzel'] == "B4.0":
+                                hinweis = "🚀 Onboarding (3 Tage vor Start)"
+                            elif item['Wartetage_davor'] > 3:
+                                hinweis = f"⚠️ {item['Wartetage_davor']} Tage Lücke davor"
+                            
+                            display_data.append({
+                                "Kategorie": item['Kategorie'],
+                                "Von": start_str,
+                                "Bis": ende_str,
+                                "Modul": item['Modul'],
+                                "Info": hinweis
+                            })
+                        
+                        st.table(display_data)
+                        
+                        # Text Output
+                        kuerzel_liste_text = []
+                        for item in bester['plan']:
+                            if item['Kuerzel'] == "SELBSTLERN":
+                                kuerzel_liste_text.append("Selbstlernphase")
+                            else:
+                                kuerzel_liste_text.append(item['Kuerzel'])
+                        
+                        final_text = (
+                            f"Gesamtzeitraum: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}\n\n"
+                            f"Modul-Abfolge:\n"
+                            f"{' -> '.join(kuerzel_liste_text)}"
+                        )
+                        
+                        st.text_area("Kompakte Daten (für E-Mail/Word):", final_text, height=150)
+
+    except Exception as e:
+        st.error(f"Fehler beim Lesen der Datei: {e}")
+
+else:
+    st.info("Bitte lade zuerst die kursdaten.xlsx hoch.")
