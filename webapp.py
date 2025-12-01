@@ -118,16 +118,10 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch):
     return moeglich, total_gap_days, plan, fehler_grund
 
 def ist_reihenfolge_gueltig(reihenfolge):
-    """
-    Prüft die zeitliche Logik.
-    Erlaubt fehlende Voraussetzungen (das wird separat geprüft),
-    aber WENN beide da sind, muss die Reihenfolge stimmen.
-    """
     gesehene_module = set()
     for modul in reihenfolge:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
-            # Nur prüfen, wenn die Voraussetzung auch im aktuellen Plan ist
             if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
                 return False
         gesehene_module.add(modul)
@@ -181,18 +175,14 @@ if uploaded_file:
             gewuenschte_module = st.multiselect("Wähle die Module aus:", verfuegbare_module)
 
         st.markdown("---")
-        
-        # Die neue Checkbox für Sonderfälle
         ignore_deps = st.checkbox("⚠️ Abhängigkeiten ignorieren (z.B. bei bestandenem Einstufungstest)")
 
         if st.button("Angebot berechnen"):
             if not gewuenschte_module:
                 st.warning("Bitte wähle mindestens ein Modul aus.")
             else:
-                # 1. Check auf fehlende Voraussetzungen
                 fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
                 
-                # ABBRUCHBEDINGUNG: Fehler gefunden UND Checkbox NICHT gesetzt
                 if fehlende_voraussetzungen and not ignore_deps:
                     st.error("❌ Berechnung gestoppt: Fehlende Voraussetzungen!")
                     for fehler in fehlende_voraussetzungen:
@@ -200,11 +190,9 @@ if uploaded_file:
                     st.warning("👉 Wenn der Teilnehmer einen Test bestanden hat, setze bitte den Haken bei 'Abhängigkeiten ignorieren' (oberhalb dieses Buttons).")
                     st.stop()
                 
-                # WARNUNG: Fehler gefunden ABER Checkbox gesetzt -> Wir machen weiter
                 if fehlende_voraussetzungen and ignore_deps:
                     st.warning(f"Achtung: Folgende Abhängigkeiten werden ignoriert: {', '.join(fehlende_voraussetzungen)}")
 
-                # 2. Berechnung
                 with st.spinner("Berechne beste Kombination..."):
                     gueltige_plaene = []
                     letzter_fehler = ""
@@ -226,6 +214,10 @@ if uploaded_file:
                     else:
                         gueltige_plaene.sort(key=bewertung_sortierung)
                         bester = gueltige_plaene[0]
+                        
+                        # --- DATUM BERECHNUNG ---
+                        gesamt_start = bester['plan'][0]['Start']
+                        gesamt_ende = bester['plan'][-1]['Ende']
                         
                         st.success(f"Bestes Angebot gefunden! (Ungedeckte Lückentage: {bester['gaps']})")
                         
@@ -249,8 +241,16 @@ if uploaded_file:
                         
                         st.table(display_data)
                         
+                        # --- TEXT GENERIERUNG ---
                         kuerzel_only = [x['Kuerzel'] for x in bester['plan'] if x['Kuerzel'] != "SELBSTLERN"]
-                        st.text_area("Kompakte Reihenfolge (für E-Mail/Word):", " -> ".join(kuerzel_only))
+                        
+                        final_text = (
+                            f"Gesamtzeitraum: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}\n\n"
+                            f"Modul-Abfolge:\n"
+                            f"{' -> '.join(kuerzel_only)}"
+                        )
+                        
+                        st.text_area("Kompakte Daten (für E-Mail/Word):", final_text, height=150)
 
     except Exception as e:
         st.error(f"Fehler beim Lesen der Datei: {e}")
