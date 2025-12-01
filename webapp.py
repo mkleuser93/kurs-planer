@@ -96,147 +96,161 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     pmpx_im_paket = PRAXIS_MODUL in modul_reihenfolge
     pmpx_bereits_platziert = False
 
-    # Teilzeit-Variablen
-    tz_zeitkonto_tage = 0
-    modul_seit_pause = 0
+    # --- TEILZEIT VARIABLEN ---
+    # tz_saldo speichert die verdiente Selbstlernzeit in TAGEN.
+    # Beispiel: 4 Wochen Kurs = 28 Tage -> Verdienst: 14 Tage Saldo.
+    tz_saldo = 0.0
+    modul_counter = 0 # Zählt Module seit der letzten Pause
     
-    # --- HAUPTSCHLEIFE DURCH MODULE ---
+    anzahl_module = len(modul_reihenfolge)
+
     for i, modul in enumerate(modul_reihenfolge):
         
-        # WHILE-Schleife: Wir versuchen so lange das Modul zu platzieren, 
-        # bis alle Lücken/Zwangspausen DAVOR abgearbeitet sind.
-        while True:
-            kurs = finde_naechsten_start(df, modul, naechster_moeglicher_start)
-            
-            if kurs is None:
-                moeglich = False
-                fehler_grund = f"Kein freier Termin für '{modul}' ab {naechster_moeglicher_start.strftime('%d.%m.%Y')} gefunden."
-                break # Bricht while
-            
-            start = kurs['Startdatum']
-            ende = kurs['Enddatum']
-            
-            gap = (start - naechster_moeglicher_start).days
-            if gap < 0: gap = 0
-            
-            # --- LOGIK-WEICHE ---
-            
-            # FALL 1: TEILZEIT AKTIV
-            if ist_teilzeit:
-                # A) Es gibt eine NATÜRLICHE Lücke (z.B. > 3 Tage warten auf Kursstart)
-                # -> Diese Lücke MUSS gefüllt werden mit TZ-Lernen (Prio 1)
-                if gap > 3:
-                    plan.append({
-                        "Modul": "Teilzeit-Selbstlernphase",
-                        "Kuerzel": "TZ-LERNEN",
-                        "Start": naechster_moeglicher_start,
-                        "Ende": start - timedelta(days=1), # Bis einen Tag vor Kursstart
-                        "Wartetage_davor": 0,
-                        "Kategorie": "Teilzeit"
-                    })
-                    # Wir haben eine Pause gemacht, also Zähler resetten
-                    modul_seit_pause = 0
-                    
-                    # Zeitkonto korrigieren (Wir haben Zeit "verbraucht")
-                    tz_zeitkonto_tage -= gap
-                    
-                    # Der nächste Start ist jetzt der Kursstart
-                    naechster_moeglicher_start = start
-                    
-                    # Gap ist jetzt gefüllt (0), also Schleife nochmal durchlaufen um Modul zu platzieren
-                    continue 
+        # 1. Kurs suchen (frühestmöglich)
+        kurs = finde_naechsten_start(df, modul, naechster_moeglicher_start)
+        
+        if kurs is None:
+            moeglich = False
+            fehler_grund = f"Kein freier Termin für '{modul}' ab {naechster_moeglicher_start.strftime('%d.%m.%Y')} gefunden."
+            break
+        
+        start = kurs['Startdatum']
+        ende = kurs['Enddatum']
+        
+        # 2. Prüfen: Gibt es eine NATÜRLICHE LÜCKE?
+        gap = (start - naechster_moeglicher_start).days
+        if gap < 0: gap = 0
+        
+        # --- TEILZEIT LOGIK: NATÜRLICHE LÜCKE NUTZEN ---
+        if ist_teilzeit:
+            if gap > 3: 
+                # Wir haben eine Lücke! Die nutzen wir als TZ-Lernen.
+                # Wir kappen die Bezeichnung nicht zwingend, aber wir verbuchen sie.
+                
+                # Wie viel der Lücke können wir als "TZ-Lernen" verbuchen?
+                # Eigentlich alles, aber wir dürfen das Saldo auch ins Minus laufen lassen, 
+                # weil wir die Zeit später wieder reinholen ("Schulden machen").
+                # ABER: Die Anforderung sagt "Nie länger als 4 Wochen am Stück".
+                
+                # Wenn die Lücke RIESIG ist (z.B. 8 Wochen), müssen wir sie splitten?
+                # Nein, wenn der Kurs erst in 8 Wochen startet, können wir das nicht ändern.
+                # Wir nennen es "TZ-Lernen + Wartezeit".
+                
+                # Wir verbuchen die Lücke gegen unser Saldo.
+                tz_saldo -= gap
+                
+                # Wenn wir eine große Lücke hatten, gilt das als Pause -> Counter Reset
+                if gap > 7:
+                    modul_counter = 0
 
-                # B) Keine Lücke, ABER wir müssen eine Pause machen (2 Module vorbei)
-                elif modul_seit_pause >= 2:
-                    # Wir erzwingen eine Pause.
-                    # Dauer: Max 28 Tage oder was auf dem Konto ist (mind. aber 1 Woche damits Sinn macht?)
-                    # Wir nehmen max 28 Tage, aber wir dürfen nicht ins Minus gehen wenn das Konto leer ist?
-                    # Doch, Gap-Filling hat Prio. Aber hier ist es "Force".
-                    # Wir nehmen Pauschal 2-4 Wochen, solange Konto positiv.
+                plan.append({
+                    "Modul": "Teilzeit-Selbstlernphase (Wartezeit)",
+                    "Kuerzel": "TZ-LERNEN",
+                    "Start": naechster_moeglicher_start,
+                    "Ende": start - timedelta(days=1),
+                    "Wartetage_davor": 0,
+                    "Kategorie": "Teilzeit"
+                })
+                
+                # Gap ist jetzt "gefüllt"
+                gap = 0 
+                
+        # --- VOLLZEIT LOGIK: LÜCKENFÜLLER ---
+        elif gap > 3: # Vollzeit
+            darf_fuellen = (not pmpx_im_paket) or pmpx_bereits_platziert
+            if darf_fuellen:
+                dauer_tage = min(gap, 14)
+                sl_start = naechster_moeglicher_start
+                sl_ende = sl_start + timedelta(days=dauer_tage)
+                plan.append({
+                    "Modul": "Indiv. Selbstlernphase",
+                    "Kuerzel": "SELBSTLERN",
+                    "Start": sl_start,
+                    "Ende": sl_ende,
+                    "Wartetage_davor": 0,
+                    "Kategorie": "Lückenfüller"
+                })
+                # Rest-Gap bleibt stehen
+                gap = gap - dauer_tage
+
+        # Modul eintragen
+        plan.append({
+            "Modul": kurs['Modulname'],
+            "Kuerzel": modul,
+            "Start": start,
+            "Ende": ende,
+            "Wartetage_davor": gap, # Sollte bei TZ 0 sein, da gefüllt
+            "Kategorie": MODUL_ZU_KAT.get(modul, "Sonstiges")
+        })
+        
+        if modul == PRAXIS_MODUL: pmpx_bereits_platziert = True
+        
+        # --- TEILZEIT: SALDO AUFLADEN ---
+        if ist_teilzeit:
+            dauer_modul = (ende - start).days + 1
+            verdienst = dauer_modul / 2  # 50% der Dauer
+            tz_saldo += verdienst
+            modul_counter += 1
+            
+            naechster_moeglicher_start = ende + timedelta(days=1)
+            
+            # --- TEILZEIT: PAUSE EINSCHIEBEN? ---
+            # Bedingungen:
+            # 1. Wir haben 2 Module hintereinander gemacht (Counter >= 2)
+            # 2. ODER wir sind am allerletzten Modul (dann müssen wir abbauen)
+            # 3. UND wir haben überhaupt Guthaben (Saldo > 0)
+            
+            is_last_module = (i == anzahl_module - 1)
+            
+            if (modul_counter >= 2 or is_last_module) and tz_saldo > 0:
+                
+                # WICHTIG: Bevor wir eine Pause erzwingen, schauen wir kurz in die Zukunft!
+                # Wenn das NÄCHSTE Modul sowieso erst in 3 Wochen startet, 
+                # brauchen wir JETZT keine künstliche Pause machen, die kommt ja gleich von selbst.
+                
+                # Einfacher Check: Wir erzwingen die Pause nur, wenn wir Guthaben haben.
+                # Die Länge ist MAXIMAL 4 Wochen (28 Tage).
+                # Wenn wir am Ende sind, nehmen wir alles (auch wenn > 4 Wochen, um auf die Summe zu kommen? 
+                # User sagte: "Nie länger als 4 Wochen". Aber wenn wir noch 6 Wochen Guthaben haben?
+                # Dann machen wir 4 Wochen Pause -> Rest verfällt? Nein, muss aufgehen.
+                # Wir machen am Ende den Rest. Zwischendrin deckeln wir auf 28.
+                
+                pause_tage = tz_saldo
+                if not is_last_module:
+                    pause_tage = min(tz_saldo, 28) # Deckel 4 Wochen zwischendrin
+                
+                # Mindestens 1 Woche Pause, sonst lohnt das Stückeln nicht (außer am Ende)
+                if pause_tage >= 5 or is_last_module:
+                    tz_start = naechster_moeglicher_start
+                    tz_ende = tz_start + timedelta(days=int(pause_tage) - 1)
+                    # -1 weil Start+1Tag = 2 Tage Spanne
+                    # Besser: start + timedelta(days=dauer) ist der Endzeitpunkt exklusiv? 
+                    # Pandas Logik: 1.1. + 1 Tag = 2.1.
+                    # Wenn Pause 1 Tag: 1.1. bis 1.1.
                     
-                    pause_tage = 28 # Standard 4 Wochen
-                    if tz_zeitkonto_tage < 28:
-                        pause_tage = max(14, int(tz_zeitkonto_tage)) # Mindestens 2 Wochen wenn möglich
+                    if pause_tage < 1: pause_tage = 1 # Safety
                     
-                    # Ausnahme: Konto ist fast leer? Trotzdem kleine Pause? 
-                    # User: "Immer 2 Module, dann Pause". Also machen wir Pause.
-                    
-                    tz_ende = naechster_moeglicher_start + timedelta(days=pause_tage)
-                    
+                    # Korrekte Berechnung Enddatum
+                    tz_ende = tz_start + timedelta(days=int(pause_tage) -1 if pause_tage >=1 else 0)
+
                     plan.append({
                         "Modul": "Teilzeit-Selbstlernphase",
                         "Kuerzel": "TZ-LERNEN",
-                        "Start": naechster_moeglicher_start,
+                        "Start": tz_start,
                         "Ende": tz_ende,
                         "Wartetage_davor": 0,
                         "Kategorie": "Teilzeit"
                     })
                     
-                    tz_zeitkonto_tage -= (pause_tage + 1)
-                    modul_seit_pause = 0
+                    tz_saldo -= pause_tage
+                    modul_counter = 0 # Reset
                     naechster_moeglicher_start = tz_ende + timedelta(days=1)
-                    
-                    # WICHTIG: Nach der Zwangspause müssen wir den Kurstermin NEU suchen!
-                    continue
 
-            # FALL 2: VOLLZEIT (Normale Lückenfüller)
-            elif gap > 3: # Nicht Teilzeit
-                darf_fuellen = (not pmpx_im_paket) or pmpx_bereits_platziert
-                if darf_fuellen:
-                    dauer_tage = min(gap, 14)
-                    sl_start = naechster_moeglicher_start
-                    sl_ende = sl_start + timedelta(days=dauer_tage)
-                    plan.append({
-                        "Modul": "Indiv. Selbstlernphase",
-                        "Kuerzel": "SELBSTLERN",
-                        "Start": sl_start,
-                        "Ende": sl_ende,
-                        "Wartetage_davor": 0,
-                        "Kategorie": "Lückenfüller"
-                    })
-                    # Wir haben gefüllt, also Startdatum verschieben und Loop neu (um Rest-Gap zu prüfen)
-                    naechster_moeglicher_start = sl_ende + timedelta(days=1)
-                    continue
-
-            # --- ENDE DER WHILE SCHLEIFE ERREICHT -> MODUL PLATZIEREN ---
-            # Wenn wir hier ankommen, ist Gap <= 3 (oder wurde gefüllt) 
-            # und keine Zwangspause steht an.
-            
-            total_gap_days += gap
-            
-            plan.append({
-                "Modul": kurs['Modulname'],
-                "Kuerzel": modul,
-                "Start": start,
-                "Ende": ende,
-                "Wartetage_davor": gap,
-                "Kategorie": MODUL_ZU_KAT.get(modul, "Sonstiges")
-            })
-            
-            # Teilzeit-Konto Aufladen (Dauer inkl. Wochenende / 2)
-            dauer_modul = (ende - start).days + 1
-            tz_zeitkonto_tage += (dauer_modul / 2)
-            
-            if modul == PRAXIS_MODUL: pmpx_bereits_platziert = True
-            
+        else:
+            # Vollzeit Standard weiter
             naechster_moeglicher_start = ende + timedelta(days=1)
-            modul_seit_pause += 1
-            break # Aus der While-Schleife raus, weiter zum nächsten Modul
-
-        if not moeglich: break
-
-    # --- ABSCHLUSS TEILZEIT: RESTGUTHABEN ---
-    if moeglich and ist_teilzeit and tz_zeitkonto_tage > 0:
-        # Resttage anhängen
-        tz_ende = naechster_moeglicher_start + timedelta(days=int(tz_zeitkonto_tage))
-        plan.append({
-            "Modul": "Teilzeit-Selbstlernphase (Abschluss)",
-            "Kuerzel": "TZ-LERNEN",
-            "Start": naechster_moeglicher_start,
-            "Ende": tz_ende,
-            "Wartetage_davor": 0,
-            "Kategorie": "Teilzeit"
-        })
+            
+    # --- ENDE FOR LOOP ---
 
     return moeglich, total_gap_days, plan, fehler_grund
 
@@ -287,15 +301,11 @@ if uploaded_file:
         df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
         df['Kuerzel'] = df['Kuerzel'].astype(str).str.strip()
         
-        if "Klassenanzahl" not in df.columns:
-            df['Klassenanzahl'] = 1
-        else:
-            df['Klassenanzahl'] = df['Klassenanzahl'].fillna(1).astype(int)
+        if "Klassenanzahl" not in df.columns: df['Klassenanzahl'] = 1
+        else: df['Klassenanzahl'] = df['Klassenanzahl'].fillna(1).astype(int)
             
-        if "Teilnehmeranzahl" not in df.columns:
-            df['Teilnehmeranzahl'] = 0
-        else:
-            df['Teilnehmeranzahl'] = df['Teilnehmeranzahl'].fillna(0).astype(int)
+        if "Teilnehmeranzahl" not in df.columns: df['Teilnehmeranzahl'] = 0
+        else: df['Teilnehmeranzahl'] = df['Teilnehmeranzahl'].fillna(0).astype(int)
 
         verfuegbare_module = sorted(df['Kuerzel'].unique())
         
@@ -310,12 +320,9 @@ if uploaded_file:
         st.markdown("---")
         
         c1, c2, c3 = st.columns(3)
-        with c1:
-            skip_b40 = st.checkbox("B4.0 überspringen")
-        with c2:
-            ignore_deps = st.checkbox("Abhängigkeiten ignorieren")
-        with c3:
-            is_teilzeit = st.checkbox("Teilzeit-Modell (50% mehr Zeit)")
+        with c1: skip_b40 = st.checkbox("B4.0 überspringen")
+        with c2: ignore_deps = st.checkbox("Abhängigkeiten ignorieren")
+        with c3: is_teilzeit = st.checkbox("Teilzeit-Modell (50% mehr Zeit)")
 
         if st.button("Angebot berechnen"):
             if not gewuenschte_module:
@@ -325,8 +332,7 @@ if uploaded_file:
                 
                 if fehlende_voraussetzungen and not ignore_deps:
                     st.error("❌ Berechnung gestoppt: Fehlende Voraussetzungen!")
-                    for fehler in fehlende_voraussetzungen:
-                        st.write(f"- {fehler}")
+                    for fehler in fehlende_voraussetzungen: st.write(f"- {fehler}")
                     st.stop()
                 
                 if fehlende_voraussetzungen and ignore_deps:
@@ -340,7 +346,6 @@ if uploaded_file:
                         if not ist_reihenfolge_gueltig(reihenfolge): continue
                         
                         b40_aktiv = not skip_b40
-                        
                         moeglich, gaps, plan, fehler = berechne_plan(df, reihenfolge, pd.to_datetime(start_datum), b40_aktiv, is_teilzeit)
                         
                         if moeglich:
@@ -366,14 +371,10 @@ if uploaded_file:
                             start_str = item['Start'].strftime('%d.%m.%Y')
                             ende_str = item['Ende'].strftime('%d.%m.%Y')
                             hinweis = ""
-                            if item['Kuerzel'] == "SELBSTLERN":
-                                hinweis = "🔹 Lückenfüller"
-                            elif item['Kuerzel'] == "TZ-LERNEN":
-                                hinweis = "⏱️ Teilzeit-Selbstlernphase"
-                            elif item['Kuerzel'] == "B4.0":
-                                hinweis = "🚀 Onboarding"
-                            elif item['Wartetage_davor'] > 3:
-                                hinweis = f"⚠️ {item['Wartetage_davor']} Tage Lücke davor"
+                            if item['Kuerzel'] == "SELBSTLERN": hinweis = "🔹 Lückenfüller"
+                            elif item['Kuerzel'] == "TZ-LERNEN": hinweis = "⏱️ Teilzeit-Lernen"
+                            elif item['Kuerzel'] == "B4.0": hinweis = "🚀 Onboarding"
+                            elif item['Wartetage_davor'] > 3: hinweis = f"⚠️ {item['Wartetage_davor']} Tage Lücke davor"
                             
                             display_data.append({
                                 "Kategorie": item['Kategorie'],
@@ -387,19 +388,15 @@ if uploaded_file:
                         
                         kuerzel_liste_text = []
                         for item in bester['plan']:
-                            if item['Kuerzel'] == "SELBSTLERN":
-                                kuerzel_liste_text.append("Selbstlernphase")
-                            elif item['Kuerzel'] == "TZ-LERNEN":
-                                kuerzel_liste_text.append("TZ-Lernen")
-                            else:
-                                kuerzel_liste_text.append(item['Kuerzel'])
+                            if item['Kuerzel'] == "SELBSTLERN": kuerzel_liste_text.append("Selbstlernphase")
+                            elif item['Kuerzel'] == "TZ-LERNEN": kuerzel_liste_text.append("TZ-Lernen")
+                            else: kuerzel_liste_text.append(item['Kuerzel'])
                         
                         final_text = (
                             f"Gesamtzeitraum: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}\n\n"
                             f"Modul-Abfolge:\n"
                             f"{' -> '.join(kuerzel_liste_text)}"
                         )
-                        
                         st.text_area("Kompakte Daten (für E-Mail/Word):", final_text, height=150)
 
     except Exception as e:
