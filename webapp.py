@@ -28,7 +28,8 @@ KATEGORIEN_MAPPING = {
     "Qualitätsmanagement": ["SQM", "PQM"],
     "Human Resources": ["PeMa", "PeEin", "ARSR", "PeFü", "KKP"],
     "Marketing": ["SEO", "SEA", "SoMe"],
-    "Lückenfüller": ["SELBSTLERN"]
+    "Lückenfüller": ["SELBSTLERN"],
+    "Teilzeit": ["TZ-LERNEN"]
 }
 
 MODUL_ZU_KAT = {}
@@ -37,14 +38,12 @@ for kat, module in KATEGORIEN_MAPPING.items():
         MODUL_ZU_KAT[mod] = kat
 
 PRAXIS_MODUL = "2wo_PMPX"
-ONBOARDING_MODUL = "B4.0"
 
 # --- FUNKTIONEN ---
 
 def finde_naechsten_start(df, modul_kuerzel, ab_datum):
     ab_datum = pd.to_datetime(ab_datum)
     
-    # Check ob Spalten existieren (Fallback falls alte Excel)
     if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
         moegliche_termine = df[
             (df['Kuerzel'] == modul_kuerzel) & 
@@ -52,7 +51,6 @@ def finde_naechsten_start(df, modul_kuerzel, ab_datum):
             (df['Teilnehmeranzahl'] < (df['Klassenanzahl'] * MAX_TEILNEHMER_PRO_KLASSE))
         ].sort_values(by='Startdatum')
     else:
-        # Fallback ohne Kapazitätsprüfung
         moegliche_termine = df[
             (df['Kuerzel'] == modul_kuerzel) & 
             (df['Startdatum'] >= ab_datum)
@@ -66,7 +64,7 @@ def berechne_kategorie_wechsel(plan):
     wechsel = 0
     letzte_kat = None
     for eintrag in plan:
-        if eintrag['Kuerzel'] in ["SELBSTLERN", "B4.0"]: continue
+        if eintrag['Kuerzel'] in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]: continue
         kuerzel = eintrag['Kuerzel']
         aktuelle_kat = MODUL_ZU_KAT.get(kuerzel, "Sonstiges")
         if letzte_kat is not None and aktuelle_kat != letzte_kat:
@@ -74,20 +72,15 @@ def berechne_kategorie_wechsel(plan):
         letzte_kat = aktuelle_kat
     return wechsel
 
-def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv):
+def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     plan = []
-    
-    # Datum konvertieren
     start_wunsch = pd.to_datetime(start_wunsch)
     naechster_moeglicher_start = start_wunsch
     
-    # --- LOGIK FÜR B4.0 (ONBOARDING) ---
+    # --- B4.0 ONBOARDING ---
     if b40_aktiv:
-        # B4.0 findet 3 Tage VOR dem eigentlichen ersten Modul statt
-        # Dauer: 1 Tag
         b40_start = start_wunsch - timedelta(days=3)
-        b40_ende = b40_start # Endet am gleichen Tag (1 Tag Dauer)
-        
+        b40_ende = b40_start
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -96,9 +89,6 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv):
             "Wartetage_davor": 0,
             "Kategorie": "Onboarding"
         })
-        
-        # Der "Gap" zwischen B4.0 (Ende -3 Tage) und Start (Tag 0) sind automatisch 2 Tage Pause
-        # Wir setzen den Zähler für Gap aber nicht hoch, da das gewollt ist.
     
     total_gap_days = 0
     moeglich = True
@@ -107,7 +97,13 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv):
     pmpx_im_paket = PRAXIS_MODUL in modul_reihenfolge
     pmpx_bereits_platziert = False
 
-    for modul in modul_reihenfolge:
+    # Teilzeit-Variablen
+    tz_zeitkonto_tage = 0
+    modul_seit_pause = 0
+    
+    anzahl_module = len(modul_reihenfolge)
+
+    for i, modul in enumerate(modul_reihenfolge):
         kurs = finde_naechsten_start(df, modul, naechster_moeglicher_start)
         
         if kurs is None:
@@ -118,11 +114,17 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv):
         start = kurs['Startdatum']
         ende = kurs['Enddatum']
         
+        # Gap Berechnung (Standard)
         gap = (start - naechster_moeglicher_start).days
         if gap < 0: gap = 0
         
-        # Lückenfüller Logik
-        if gap > 3:
+        # --- LÜCKENFÜLLER (NUR WENN NICHT TEILZEIT) ---
+        # Im Teilzeitmodell füllen wir Lücken primär durch die TZ-Pause.
+        # Nur wenn dann noch eine riesige Lücke ist, könnte man füllen, 
+        # aber um Doppelung zu vermeiden, deaktivieren wir Auto-Fill bei Teilzeit 
+        # oder nutzen es nur für "Rest-Wartezeit".
+        
+        if not ist_teilzeit and gap > 3:
             darf_fuellen = (not pmpx_im_paket) or pmpx_bereits_platziert
             if darf_fuellen:
                 dauer_tage = min(gap, 14)
@@ -140,6 +142,7 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv):
         
         total_gap_days += gap
         
+        # Modul hinzufügen
         plan.append({
             "Modul": kurs['Modulname'],
             "Kuerzel": modul,
@@ -149,8 +152,51 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv):
             "Kategorie": MODUL_ZU_KAT.get(modul, "Sonstiges")
         })
         
-        naechster_moeglicher_start = ende + timedelta(days=1)
         if modul == PRAXIS_MODUL: pmpx_bereits_platziert = True
+        
+        # Nächster Start erst mal regulär nach Modulende
+        naechster_moeglicher_start = ende + timedelta(days=1)
+        
+        # --- TEILZEIT LOGIK ---
+        if ist_teilzeit:
+            # 1. Zeitkonto füllen (50% der Moduldauer)
+            dauer_modul = (ende - start).days + 1
+            tz_zeitkonto_tage += (dauer_modul / 2)
+            
+            modul_seit_pause += 1
+            is_last_module = (i == anzahl_module - 1)
+            
+            # 2. Prüfen ob Pause eingelegt werden soll (alle 2 Module ODER am Ende)
+            if modul_seit_pause >= 2 or is_last_module:
+                # Wie viel Pause nehmen wir? Max 4 Wochen (28 Tage) oder was auf dem Konto ist
+                pause_tage = min(tz_zeitkonto_tage, 28)
+                
+                # Wenn es das allerletzte Modul ist, MÜSSEN wir den Rest nehmen, 
+                # damit die Gesamtrechnung aufgeht.
+                if is_last_module:
+                    pause_tage = tz_zeitkonto_tage
+                
+                # Pause einfügen (nur wenn > 0)
+                if pause_tage > 0:
+                    tz_start = naechster_moeglicher_start
+                    # Achtung: timedelta mag float nicht gerne, daher int()
+                    tz_ende = tz_start + timedelta(days=int(pause_tage))
+                    
+                    plan.append({
+                        "Modul": "Teilzeit-Selbstlernphase",
+                        "Kuerzel": "TZ-LERNEN",
+                        "Start": tz_start,
+                        "Ende": tz_ende,
+                        "Wartetage_davor": 0,
+                        "Kategorie": "Teilzeit"
+                    })
+                    
+                    # Konto und Counter resetten
+                    tz_zeitkonto_tage -= pause_tage
+                    modul_seit_pause = 0
+                    
+                    # Der nächste Kurs kann erst NACH der Teilzeit-Pause starten
+                    naechster_moeglicher_start = tz_ende + timedelta(days=1)
 
     return moeglich, total_gap_days, plan, fehler_grund
 
@@ -175,7 +221,7 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
     return fehler_liste
 
 def bewertung_sortierung(plan_info):
-    echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0"]]
+    echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     try:
         pmpx_index = echte_module.index(PRAXIS_MODUL)
     except ValueError:
@@ -201,7 +247,6 @@ if uploaded_file:
         df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
         df['Kuerzel'] = df['Kuerzel'].astype(str).str.strip()
         
-        # Spalten vorbereiten (Kapazität)
         if "Klassenanzahl" not in df.columns:
             df['Klassenanzahl'] = 1
         else:
@@ -216,27 +261,27 @@ if uploaded_file:
         
         col1, col2 = st.columns(2)
         with col1:
-            # Hinweis für den User
-            st.info("ℹ️ Das Datum unten ist der Start des ERSTEN Fachmoduls. B4.0 startet automatisch 3 Tage früher.")
+            st.info("ℹ️ Datum ist Start des ERSTEN Fachmoduls.")
             start_datum = st.date_input("Gewünschter Start Fachmodul", date(2026, 2, 9))
         
         with col2:
-            gewuenschte_module = st.multiselect("Wähle die Fachmodule aus:", verfuegbare_module)
+            gewuenschte_module = st.multiselect("Fachmodule auswählen:", verfuegbare_module)
 
         st.markdown("---")
         
-        # Checkboxen nebeneinander
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            skip_b40 = st.checkbox("B4.0 überspringen (Wiederkehrer)")
+            skip_b40 = st.checkbox("B4.0 überspringen")
         with c2:
-            ignore_deps = st.checkbox("⚠️ Abhängigkeiten ignorieren (Test bestanden)")
+            ignore_deps = st.checkbox("Abhängigkeiten ignorieren")
+        with c3:
+            # NEU: Die Teilzeit Checkbox
+            is_teilzeit = st.checkbox("Teilzeit-Modell (50% mehr Zeit)")
 
         if st.button("Angebot berechnen"):
             if not gewuenschte_module:
                 st.warning("Bitte wähle mindestens ein Fachmodul aus.")
             else:
-                # Voraussetzungs-Check
                 fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
                 
                 if fehlende_voraussetzungen and not ignore_deps:
@@ -252,14 +297,13 @@ if uploaded_file:
                     gueltige_plaene = []
                     letzter_fehler = ""
                     
-                    # Permutationen berechnen
                     for reihenfolge in itertools.permutations(gewuenschte_module):
                         if not ist_reihenfolge_gueltig(reihenfolge): continue
                         
-                        # Hier übergeben wir, ob B4.0 aktiv sein soll (True wenn NICHT übersprungen)
                         b40_aktiv = not skip_b40
                         
-                        moeglich, gaps, plan, fehler = berechne_plan(df, reihenfolge, pd.to_datetime(start_datum), b40_aktiv)
+                        # Hier übergeben wir jetzt "is_teilzeit"
+                        moeglich, gaps, plan, fehler = berechne_plan(df, reihenfolge, pd.to_datetime(start_datum), b40_aktiv, is_teilzeit)
                         
                         if moeglich:
                             switches = berechne_kategorie_wechsel(plan)
@@ -277,7 +321,7 @@ if uploaded_file:
                         gesamt_start = bester['plan'][0]['Start']
                         gesamt_ende = bester['plan'][-1]['Ende']
                         
-                        st.success(f"Angebot erstellt! (Starttermin B4.0: {gesamt_start.strftime('%d.%m.%Y')})")
+                        st.success(f"Angebot erstellt! (Teilzeit: {'JA' if is_teilzeit else 'NEIN'})")
                         
                         display_data = []
                         for item in bester['plan']:
@@ -286,8 +330,10 @@ if uploaded_file:
                             hinweis = ""
                             if item['Kuerzel'] == "SELBSTLERN":
                                 hinweis = "🔹 Lückenfüller"
+                            elif item['Kuerzel'] == "TZ-LERNEN":
+                                hinweis = "⏱️ Teilzeit-Selbstlernphase"
                             elif item['Kuerzel'] == "B4.0":
-                                hinweis = "🚀 Onboarding (3 Tage vor Start)"
+                                hinweis = "🚀 Onboarding"
                             elif item['Wartetage_davor'] > 3:
                                 hinweis = f"⚠️ {item['Wartetage_davor']} Tage Lücke davor"
                             
@@ -301,11 +347,12 @@ if uploaded_file:
                         
                         st.table(display_data)
                         
-                        # Text Output
                         kuerzel_liste_text = []
                         for item in bester['plan']:
                             if item['Kuerzel'] == "SELBSTLERN":
                                 kuerzel_liste_text.append("Selbstlernphase")
+                            elif item['Kuerzel'] == "TZ-LERNEN":
+                                kuerzel_liste_text.append("TZ-Lernen")
                             else:
                                 kuerzel_liste_text.append(item['Kuerzel'])
                         
