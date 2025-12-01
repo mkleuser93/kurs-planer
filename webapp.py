@@ -4,7 +4,6 @@ from datetime import timedelta, date
 import itertools
 
 # --- KONFIGURATION ---
-# Hier wurde der Titel angepasst:
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅")
 
 # Abhängigkeiten definieren
@@ -149,7 +148,6 @@ def bewertung_sortierung(plan_info):
 
 # --- UI LOGIK ---
 
-# Hier wurde der Titel angepasst:
 st.title("🎓 mycareernow Angebots-Generator")
 st.write("Lade die Excel-Liste hoch und wähle die Module aus.")
 
@@ -243,13 +241,18 @@ if uploaded_file:
                         
                         st.table(display_data)
                         
-                        # --- TEXT GENERIERUNG ---
-                        kuerzel_only = [x['Kuerzel'] for x in bester['plan'] if x['Kuerzel'] != "SELBSTLERN"]
+                        # --- TEXT GENERIERUNG (FIX: Selbstlernphase anzeigen) ---
+                        kuerzel_liste_text = []
+                        for item in bester['plan']:
+                            if item['Kuerzel'] == "SELBSTLERN":
+                                kuerzel_liste_text.append("Selbstlernphase")
+                            else:
+                                kuerzel_liste_text.append(item['Kuerzel'])
                         
                         final_text = (
                             f"Gesamtzeitraum: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}\n\n"
                             f"Modul-Abfolge:\n"
-                            f"{' -> '.join(kuerzel_only)}"
+                            f"{' -> '.join(kuerzel_liste_text)}"
                         )
                         
                         st.text_area("Kompakte Daten (für E-Mail/Word):", final_text, height=150)
