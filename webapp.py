@@ -264,3 +264,146 @@ def bewertung_sortierung(plan_info):
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     try:
         pmpx_index = echte_module.index(PRAXIS_MODUL)
+    except ValueError:
+        pmpx_index = -1 
+    return (plan_info['gaps'], plan_info['switches'], -pmpx_index)
+
+# --- UI LOGIK ---
+
+st.title("🎓 mycareernow Angebotsplaner")
+st.write("Lade die Excel-Liste hoch (inkl. Spalten 'Klassenanzahl' und 'Teilnehmeranzahl').")
+
+uploaded_file = st.file_uploader("Kursdaten (Excel) hochladen", type=["xlsx", "csv"])
+
+if uploaded_file:
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, sep=';')
+        else:
+            df = pd.read_excel(uploaded_file)
+            
+        df.columns = [c.strip() for c in df.columns]
+        df['Startdatum'] = pd.to_datetime(df['Startdatum'], dayfirst=True)
+        df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
+        df['Kuerzel'] = df['Kuerzel'].astype(str).str.strip()
+        
+        if "Klassenanzahl" not in df.columns:
+            df['Klassenanzahl'] = 1
+        else:
+            df['Klassenanzahl'] = df['Klassenanzahl'].fillna(1).astype(int)
+            
+        if "Teilnehmeranzahl" not in df.columns:
+            df['Teilnehmeranzahl'] = 0
+        else:
+            df['Teilnehmeranzahl'] = df['Teilnehmeranzahl'].fillna(0).astype(int)
+
+        verfuegbare_module = sorted(df['Kuerzel'].unique())
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info("ℹ️ Datum ist Start des ERSTEN Fachmoduls.")
+            start_datum = st.date_input("Gewünschter Start Fachmodul", date(2026, 2, 9))
+        
+        with col2:
+            gewuenschte_module = st.multiselect("Fachmodule auswählen:", verfuegbare_module)
+
+        st.markdown("---")
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            skip_b40 = st.checkbox("B4.0 überspringen")
+        with c2:
+            ignore_deps = st.checkbox("Abhängigkeiten ignorieren")
+        with c3:
+            is_teilzeit = st.checkbox("Teilzeit-Modell (50% mehr Zeit)")
+
+        if st.button("Angebot berechnen"):
+            if not gewuenschte_module:
+                st.warning("Bitte wähle mindestens ein Fachmodul aus.")
+            else:
+                fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
+                
+                if fehlende_voraussetzungen and not ignore_deps:
+                    st.error("❌ Berechnung gestoppt: Fehlende Voraussetzungen!")
+                    for fehler in fehlende_voraussetzungen:
+                        st.write(f"- {fehler}")
+                    st.stop()
+                
+                if fehlende_voraussetzungen and ignore_deps:
+                    st.warning(f"Ignoriere Abhängigkeiten: {', '.join(fehlende_voraussetzungen)}")
+
+                with st.spinner("Berechne beste Kombination..."):
+                    gueltige_plaene = []
+                    letzter_fehler = ""
+                    
+                    for reihenfolge in itertools.permutations(gewuenschte_module):
+                        if not ist_reihenfolge_gueltig(reihenfolge): continue
+                        
+                        b40_aktiv = not skip_b40
+                        
+                        moeglich, gaps, plan, fehler = berechne_plan(df, reihenfolge, pd.to_datetime(start_datum), b40_aktiv, is_teilzeit)
+                        
+                        if moeglich:
+                            switches = berechne_kategorie_wechsel(plan)
+                            gueltige_plaene.append({"gaps": gaps, "switches": switches, "plan": plan})
+                        else:
+                            letzter_fehler = fehler
+                    
+                    if not gueltige_plaene:
+                        st.error("Kein Plan möglich!")
+                        st.info(f"Grund: {letzter_fehler}")
+                    else:
+                        gueltige_plaene.sort(key=bewertung_sortierung)
+                        bester = gueltige_plaene[0]
+                        
+                        gesamt_start = bester['plan'][0]['Start']
+                        gesamt_ende = bester['plan'][-1]['Ende']
+                        
+                        st.success(f"Angebot erstellt! (Teilzeit: {'JA' if is_teilzeit else 'NEIN'})")
+                        
+                        display_data = []
+                        for item in bester['plan']:
+                            start_str = item['Start'].strftime('%d.%m.%Y')
+                            ende_str = item['Ende'].strftime('%d.%m.%Y')
+                            hinweis = ""
+                            if item['Kuerzel'] == "SELBSTLERN":
+                                hinweis = "🔹 Lückenfüller"
+                            elif item['Kuerzel'] == "TZ-LERNEN":
+                                hinweis = "⏱️ Teilzeit-Selbstlernphase"
+                            elif item['Kuerzel'] == "B4.0":
+                                hinweis = "🚀 Onboarding"
+                            elif item['Wartetage_davor'] > 3:
+                                hinweis = f"⚠️ {item['Wartetage_davor']} Tage Lücke davor"
+                            
+                            display_data.append({
+                                "Kategorie": item['Kategorie'],
+                                "Von": start_str,
+                                "Bis": ende_str,
+                                "Modul": item['Modul'],
+                                "Info": hinweis
+                            })
+                        
+                        st.table(display_data)
+                        
+                        kuerzel_liste_text = []
+                        for item in bester['plan']:
+                            if item['Kuerzel'] == "SELBSTLERN":
+                                kuerzel_liste_text.append("Selbstlernphase")
+                            elif item['Kuerzel'] == "TZ-LERNEN":
+                                kuerzel_liste_text.append("TZ-Lernen")
+                            else:
+                                kuerzel_liste_text.append(item['Kuerzel'])
+                        
+                        final_text = (
+                            f"Gesamtzeitraum: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}\n\n"
+                            f"Modul-Abfolge:\n"
+                            f"{' -> '.join(kuerzel_liste_text)}"
+                        )
+                        
+                        st.text_area("Kompakte Daten (für E-Mail/Word):", final_text, height=150)
+
+    except Exception as e:
+        st.error(f"Fehler beim Lesen der Datei: {e}")
+
+else:
+    st.info("Bitte lade zuerst die kursdaten.xlsx hoch.")
