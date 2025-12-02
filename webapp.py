@@ -11,19 +11,22 @@ from streamlit_quill import st_quill
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
 
-# VERSUCH: Deutsche Locale setzen (für Wochentage etc.)
+# Locale setzen
 try:
     locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
 except:
     try:
-        locale.setlocale(locale.LC_ALL, 'de_DE') # Windows Fallback
+        locale.setlocale(locale.LC_ALL, 'de_DE')
     except:
-        pass # Falls System kein Deutsch hat, Standard lassen
+        pass
 
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 ADMIN_PASSWORD = "mycarrEer.admin!186"
 
+# ABHÄNGIGKEITEN DEFINITION
+# String = Muss zwingend vorher da sein
+# Tuple = EINES davon muss zwingend vorher da sein (OR-Logik)
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
@@ -32,7 +35,8 @@ ABHAENGIGKEITEN = {
     "PSK": "PSM1",
     "PAL-E": "PSM1",
     "PAL-EBM": "PSM1",
-    "AKI-EX": "AKI"
+    "AKI-EX": "AKI",
+    "2wo_PMPX": ("PSM1", "IPMA") # NEU: PSM1 ODER IPMA muss vorher absolviert sein
 }
 
 KATEGORIEN_MAPPING = {
@@ -243,19 +247,44 @@ def ist_reihenfolge_gueltig(reihenfolge):
     for modul in reihenfolge:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
-            if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
-                return False
+            # Fall 1: OR-Logik (Tuple) - z.B. 2wo_PMPX braucht (PSM1, IPMA)
+            if isinstance(voraussetzung, tuple):
+                # Es muss MINDESTENS EINES der Voraussetzungs-Module schon gesehen worden sein
+                erfuellt = any(v in gesehene_module for v in voraussetzung)
+                if not erfuellt:
+                    return False
+            
+            # Fall 2: Single-Logik (String) - z.B. PSPO1 braucht PSM1
+            elif isinstance(voraussetzung, str):
+                # Wenn die Voraussetzung überhaupt im Plan vorkommt (Auswahl), 
+                # dann muss sie zwingend VORHER kommen.
+                # Achtung: Wenn sie gar nicht ausgewählt ist, greift check_fehlende_voraussetzungen
+                if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
+                    return False
+                    
         gesehene_module.add(modul)
     return True
 
 def check_fehlende_voraussetzungen(gewuenschte_module):
     fehler_liste = []
     auswahl_set = set(gewuenschte_module)
+    
     for modul in gewuenschte_module:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
-            if voraussetzung not in auswahl_set:
-                fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
+            # Fall 1: OR-Logik (Tuple)
+            if isinstance(voraussetzung, tuple):
+                # Prüfen, ob MINDESTENS EINES der benötigten Module ausgewählt wurde
+                erfuellt = any(v in auswahl_set for v in voraussetzung)
+                if not erfuellt:
+                    optionen_str = " oder ".join(voraussetzung)
+                    fehler_liste.append(f"Modul '{modul}' benötigt zwingend eines dieser Module: {optionen_str}")
+            
+            # Fall 2: Single-Logik (String)
+            elif isinstance(voraussetzung, str):
+                if voraussetzung not in auswahl_set:
+                    fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
+                    
     return fehler_liste
 
 # --- SCORE LOGIK (PRIO 1: KEINE LÜCKEN) ---
@@ -361,7 +390,6 @@ if uploaded_file:
         col1, col2 = st.columns(2)
         with col1:
             st.info("ℹ️ Datum ist Start des ERSTEN Fachmoduls.")
-            # HIER DIE ÄNDERUNG: Format auf Deutsch zwingen
             start_datum = st.date_input(
                 "Gewünschter Start Fachmodul", 
                 value=date(2026, 2, 9),
