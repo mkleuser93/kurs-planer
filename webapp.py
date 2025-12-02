@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import timedelta, date
 import itertools
@@ -12,7 +13,6 @@ st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wi
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 
-# Abhängigkeiten (IT-TOOLS ist befreit)
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1",
@@ -247,45 +247,25 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
                 fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
     return fehler_liste
 
-# --- NEUE SORTIER-LOGIK ---
+# --- SCORE LOGIK ---
 def bewertung_sortierung(plan_info):
-    """
-    Berechnet einen Score für den Plan.
-    Kleiner Score = Besser.
-    Sortierung:
-    1. Gaps (Lücken minimieren)
-    2. Switches (Themenwechsel minimieren)
-    3. Heuristik-Score (Wunsch-Reihenfolge)
-    """
-    
-    # Liste der echten Module extrahieren (ohne Pausen)
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
-    
-    # Dictionary mit Index-Positionen erstellen: {'PSM1': 0, 'AKI': 1 ...}
     idx = {mod: i for i, mod in enumerate(echte_module)}
-    
     soft_score = 0
     
-    # 1. HEURISTIK: PSPO1 und PMPX sollten VOR PAL stehen
+    # PAL Logik
     pals = ["PAL-E", "PAL-EBM"]
     referenz_module_fuer_vorne = ["PSPO1", "2wo_PMPX"]
-    
     for pal in pals:
         if pal in idx:
             for ref in referenz_module_fuer_vorne:
                 if ref in idx:
-                    # Wenn PAL VOR dem Referenzmodul steht -> Strafe (+50)
-                    if idx[pal] < idx[ref]:
-                        soft_score += 50
+                    if idx[pal] < idx[ref]: soft_score += 50
     
-    # 2. HEURISTIK: Module die weit nach hinten sollen
-    # Je weiter hinten (höherer Index), desto mehr ziehen wir vom Score ab.
-    # IT-TOOLS, PAL-E, PAL-EBM
+    # Late Bloomers
     late_bloomers = ["IT-TOOLS", "PAL-E", "PAL-EBM"]
     for l in late_bloomers:
-        if l in idx:
-            # Index abziehen (Position 5 ist besser als Position 0)
-            soft_score -= idx[l]
+        if l in idx: soft_score -= idx[l]
 
     return (plan_info['gaps'], plan_info['switches'], soft_score)
 
@@ -293,19 +273,16 @@ def bewertung_sortierung(plan_info):
 
 st.title("🎓 mycareernow Angebotsplaner")
 
-# --- SIDEBAR: RICHTEXT EDITOR ---
+# --- SIDEBAR: TEXT EDITOR ---
 st.sidebar.header("📝 Texte verwalten")
-st.sidebar.info("Kopiere die Texte direkt formatiert aus HubSpot hier rein.")
+st.sidebar.info("Texte für HubSpot (inkl. Formatierung) hier einfügen.")
 
-# Liste aller bekannten Kürzel
 all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
 for k_list in KATEGORIEN_MAPPING.values():
-    for k in k_list:
-        all_known_kuerzel.add(k)
+    for k in k_list: all_known_kuerzel.add(k)
 all_known_kuerzel.add("B4.0")
 all_known_kuerzel.add("SELBSTLERN")
 all_known_kuerzel.add("TZ-LERNEN")
-# IT-TOOLS ist via KATEGORIEN_MAPPING schon drin
 
 sorted_kuerzel = sorted(list(all_known_kuerzel))
 
@@ -313,20 +290,15 @@ selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
 current_texts = load_texts()
 current_text_value = current_texts.get(selected_modul, "")
 
-new_text_html = st_quill(
-    value=current_text_value, 
-    html=True, 
-    key=f"quill_{selected_modul}",
-    placeholder="Hier formatierten Text aus HubSpot einfügen..."
-)
+new_text_html = st_quill(value=current_text_value, html=True, key=f"quill_{selected_modul}", placeholder="Text hier einfügen...")
 
 if st.sidebar.button("💾 Text Speichern"):
     save_text(selected_modul, new_text_html)
-    st.sidebar.success(f"Text für {selected_modul} gespeichert!")
+    st.sidebar.success(f"Gespeichert: {selected_modul}")
 
 # --- HAUPTBEREICH ---
 
-st.write("Lade die Excel-Liste hoch (Nur für Termine). Texte werden links verwaltet.")
+st.write("Lade die Excel-Liste hoch.")
 uploaded_file = st.file_uploader("Kursdaten (Excel) hochladen", type=["xlsx", "csv"])
 
 if uploaded_file:
@@ -372,7 +344,7 @@ if uploaded_file:
                 fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
                 
                 if fehlende_voraussetzungen and not ignore_deps:
-                    st.error("❌ Berechnung gestoppt: Fehlende Voraussetzungen!")
+                    st.error("❌ Fehlende Voraussetzungen!")
                     for fehler in fehlende_voraussetzungen: st.write(f"- {fehler}")
                     st.stop()
                 
@@ -381,7 +353,6 @@ if uploaded_file:
 
                 with st.spinner("Berechne beste Kombination..."):
                     gueltige_plaene = []
-                    letzter_fehler = ""
                     
                     for reihenfolge in itertools.permutations(gewuenschte_module):
                         if not ist_reihenfolge_gueltig(reihenfolge): continue
@@ -392,12 +363,9 @@ if uploaded_file:
                         if moeglich:
                             switches = berechne_kategorie_wechsel(plan)
                             gueltige_plaene.append({"gaps": gaps, "switches": switches, "plan": plan})
-                        else:
-                            letzter_fehler = fehler
                     
                     if not gueltige_plaene:
                         st.error("Kein Plan möglich!")
-                        st.info(f"Grund: {letzter_fehler}")
                     else:
                         gueltige_plaene.sort(key=bewertung_sortierung)
                         bester = gueltige_plaene[0]
@@ -407,7 +375,7 @@ if uploaded_file:
                         
                         st.success(f"Angebot erstellt! (Gesamt: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')})")
                         
-                        # --- TABELLE ANZEIGEN ---
+                        # --- TABELLE ZUR KONTROLLE ---
                         display_data = []
                         for item in bester['plan']:
                             start_str = item['Start'].strftime('%d.%m.%Y')
@@ -416,7 +384,6 @@ if uploaded_file:
                             if item['Kuerzel'] == "SELBSTLERN": hinweis = "🔹 Lückenfüller"
                             elif item['Kuerzel'] == "TZ-LERNEN": hinweis = "⏱️ Teilzeit-Lernen"
                             elif item['Kuerzel'] == "B4.0": hinweis = "🚀 Onboarding"
-                            elif item['Wartetage_davor'] > 3: hinweis = f"⚠️ {item['Wartetage_davor']} Tage Rest-Lücke"
                             
                             display_data.append({
                                 "Kategorie": item['Kategorie'],
@@ -427,26 +394,60 @@ if uploaded_file:
                             })
                         st.table(display_data)
 
-                        # --- HUBSPOT COPY & PASTE ---
-                        st.subheader("📋 Copy & Paste für HubSpot")
-                        st.info("Markiere den Inhalt unten. Er enthält nur deine Texte in der richtigen Reihenfolge.")
-                        
+                        # --- GENERIERUNG DES HTML-STRINGS FÜR DIE ZWISCHENABLAGE ---
                         TEXT_MAPPING = load_texts()
+                        html_content_for_clipboard = ""
 
-                        with st.container(border=True):
-                            for item in bester['plan']:
-                                k = item['Kuerzel']
-                                
-                                beschreibung_html = TEXT_MAPPING.get(k, "")
-                                
-                                if not beschreibung_html:
-                                    if k == "B4.0": beschreibung_html = "<p>Bildung 4.0 - Virtual Classroom</p>"
-                                    elif k == "SELBSTLERN": beschreibung_html = "<p>Individuelle Selbstlernphase</p>"
-                                    elif k == "TZ-LERNEN": beschreibung_html = "<p>Teilzeit-Selbstlernphase</p>"
-                                    else: beschreibung_html = f"<p>Text für {k} fehlt.</p>"
+                        for item in bester['plan']:
+                            k = item['Kuerzel']
+                            beschreibung_html = TEXT_MAPPING.get(k, "")
+                            
+                            if not beschreibung_html:
+                                # Standard-Texte falls nicht definiert
+                                if k == "B4.0": beschreibung_html = "<p><strong>Bildung 4.0</strong><br>Einführung in den virtuellen Klassenraum.</p>"
+                                elif k == "SELBSTLERN": beschreibung_html = "<p><strong>Individuelle Selbstlernphase</strong></p>"
+                                elif k == "TZ-LERNEN": beschreibung_html = "<p><strong>Teilzeit-Selbstlernphase</strong></p>"
+                                else: beschreibung_html = f"<p><em>Text für {k} fehlt.</em></p>"
+                            
+                            html_content_for_clipboard += f"{beschreibung_html}<br>"
 
-                                st.markdown(beschreibung_html, unsafe_allow_html=True)
-                                st.markdown("<br>", unsafe_allow_html=True)
+                        # --- COPY BUTTON KOMPONENTE ---
+                        st.subheader("📋 Angebot kopieren")
+                        st.info("Klicke auf den Button, um die Textbausteine (mit Formatierung) in die Zwischenablage zu kopieren.")
+
+                        # Wir bauen eine HTML-Komponente mit integriertem Skript
+                        # Das ist der zuverlässigste Weg, um "formatierten" Text zu kopieren
+                        
+                        js_code = f"""
+                        <div id="content-to-copy" style="border:1px solid #ddd; padding:10px; background:#f9f9f9; max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
+                            {html_content_for_clipboard}
+                        </div>
+                        <button onclick="copyToClipboard()" style="background-color:#4CAF50; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px;">
+                           📋 In Zwischenablage kopieren
+                        </button>
+                        <script>
+                        function copyToClipboard() {{
+                            const node = document.getElementById('content-to-copy');
+                            const selection = window.getSelection();
+                            const range = document.createRange();
+                            range.selectNodeContents(node);
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                            
+                            try {{
+                                document.execCommand('copy');
+                                alert('Erfolgreich kopiert! Du kannst es jetzt in HubSpot einfügen (Strg+V).');
+                            }} catch (err) {{
+                                alert('Fehler beim Kopieren: ' + err);
+                            }}
+                            
+                            selection.removeAllRanges();
+                        }}
+                        </script>
+                        """
+                        
+                        # Einbetten via components
+                        components.html(js_code, height=400, scrolling=True)
 
     except Exception as e:
         st.error(f"Fehler: {e}")
