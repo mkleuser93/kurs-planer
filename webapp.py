@@ -12,6 +12,7 @@ st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wi
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 
+# KORREKTUR: IT-TOOLS hat keine Abhängigkeit mehr
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1",
@@ -20,8 +21,7 @@ ABHAENGIGKEITEN = {
     "PSK": "PSM1",
     "PAL-E": "PSM1",
     "PAL-EBM": "PSM1",
-    "AKI-EX": "AKI",
-    "IT-TOOLS": "PMPX",
+    "AKI-EX": "AKI"
 }
 
 KATEGORIEN_MAPPING = {
@@ -104,8 +104,8 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     
     # --- ONBOARDING (B4.0) ---
     if b40_aktiv:
-        b40_start = current_monday - timedelta(days=3)
-        b40_ende = b40_start
+        b40_start = current_monday - timedelta(days=3) # Freitag
+        b40_ende = b40_start # 1 Tag
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -211,6 +211,7 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
 
         if not moeglich: break
 
+    # --- ENDABRECHNUNG TEILZEIT ---
     if moeglich and ist_teilzeit and tz_guthaben_wochen >= 1:
         weeks_left = int(tz_guthaben_wochen)
         if weeks_left >= 1:
@@ -277,8 +278,6 @@ selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
 current_texts = load_texts()
 current_text_value = current_texts.get(selected_modul, "")
 
-# DER NEUE EDITOR (Quill)
-# Dieser Editor behält Fett, Kursiv, Listen, etc.
 new_text_html = st_quill(
     value=current_text_value, 
     html=True, 
@@ -371,8 +370,9 @@ if uploaded_file:
                         gesamt_start = bester['plan'][0]['Start']
                         gesamt_ende = bester['plan'][-1]['Ende']
                         
-                        st.success(f"Angebot erstellt! (Teilzeit: {'JA' if is_teilzeit else 'NEIN'})")
+                        st.success(f"Angebot erstellt! (Gesamt: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')})")
                         
+                        # --- TABELLE ANZEIGEN ---
                         display_data = []
                         for item in bester['plan']:
                             start_str = item['Start'].strftime('%d.%m.%Y')
@@ -392,41 +392,26 @@ if uploaded_file:
                             })
                         st.table(display_data)
 
-                        # --- HUBSPOT READY OUTPUT ---
-                        st.subheader("📋 Fertiges Angebot für HubSpot")
-                        st.info("👇 Unten ist das fertige Angebot. Du kannst es markieren, kopieren und in HubSpot einfügen. Die Formatierung (Fett, Listen) bleibt erhalten!")
+                        # --- HUBSPOT COPY & PASTE ---
+                        st.subheader("📋 Copy & Paste für HubSpot")
+                        st.info("Markiere den Inhalt unten. Er enthält nur deine Texte in der richtigen Reihenfolge.")
                         
                         TEXT_MAPPING = load_texts()
 
                         with st.container(border=True):
-                            # Header (HTML gerendert)
-                            st.markdown(f"**Gesamtzeitraum:** {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}", unsafe_allow_html=True)
-                            if is_teilzeit:
-                                st.markdown("*(Teilzeit-Modell)*", unsafe_allow_html=True)
-                            st.markdown("<hr>", unsafe_allow_html=True)
-                            
-                            # Module
                             for item in bester['plan']:
                                 k = item['Kuerzel']
-                                start_s = item['Start'].strftime('%d.%m.%Y')
-                                ende_s = item['Ende'].strftime('%d.%m.%Y')
-                                modul_name = item['Modul']
                                 
-                                # Beschreibung (HTML) laden
                                 beschreibung_html = TEXT_MAPPING.get(k, "")
                                 
                                 if not beschreibung_html:
-                                    if k == "B4.0": beschreibung_html = "<p>Einführung in den virtuellen Klassenraum.</p>"
-                                    elif k == "SELBSTLERN": beschreibung_html = "<p>Individuelle Selbstlernphase.</p>"
-                                    elif k == "TZ-LERNEN": beschreibung_html = "<p>Teilzeit-Selbstlernphase.</p>"
-                                    else: beschreibung_html = "<p><i>Keine Beschreibung hinterlegt.</i></p>"
+                                    if k == "B4.0": beschreibung_html = "<p>Bildung 4.0 - Virtual Classroom</p>"
+                                    elif k == "SELBSTLERN": beschreibung_html = "<p>Individuelle Selbstlernphase</p>"
+                                    elif k == "TZ-LERNEN": beschreibung_html = "<p>Teilzeit-Selbstlernphase</p>"
+                                    else: beschreibung_html = f"<p>Text für {k} fehlt.</p>"
 
-                                # RENDER BLOCK
-                                # Wir nutzen unsafe_allow_html=True, damit die HTML-Tags aus dem Editor 
-                                # (<b>, <ul>, etc.) auch wirklich als Fett/Liste angezeigt werden.
-                                st.markdown(f"<h4>🗓️ {start_s} - {ende_s} | {modul_name} ({k})</h4>", unsafe_allow_html=True)
                                 st.markdown(beschreibung_html, unsafe_allow_html=True)
-                                st.markdown("<hr>", unsafe_allow_html=True)
+                                st.markdown("<br>", unsafe_allow_html=True)
 
     except Exception as e:
         st.error(f"Fehler: {e}")
