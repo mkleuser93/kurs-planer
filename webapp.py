@@ -2,12 +2,14 @@ import streamlit as st
 import pandas as pd
 from datetime import timedelta, date
 import itertools
-import math
+import json
+import os
 
 # --- KONFIGURATION ---
-st.set_page_config(page_title="mycareernow Planer", page_icon="📅")
+st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
 
 MAX_TEILNEHMER_PRO_KLASSE = 20
+TEXT_FILE = "modul_texte.json"
 
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
@@ -39,40 +41,32 @@ for kat, module in KATEGORIEN_MAPPING.items():
 
 PRAXIS_MODUL = "2wo_PMPX"
 
-# --- HELPER FUNKTIONEN (DATUM) ---
+# --- HELPER FUNKTIONEN (TEXTE LADEN/SPEICHERN) ---
+
+def load_texts():
+    if not os.path.exists(TEXT_FILE):
+        return {}
+    with open(TEXT_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_text(kuerzel, text):
+    data = load_texts()
+    data[kuerzel] = text
+    with open(TEXT_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    return data
+
+# --- HELPER FUNKTIONEN (LOGIK) ---
 
 def get_next_monday(d):
-    """Schiebt ein Datum auf den nächsten Montag, falls es Sa/So ist."""
-    wd = d.weekday()
-    if wd == 5: # Samstag
-        return d + timedelta(days=2)
-    elif wd == 6: # Sonntag
-        return d + timedelta(days=1)
-    return d
+    wd = d.weekday() 
+    if wd == 0: return d
+    return d + timedelta(days=(7 - wd))
 
-def ensure_friday_end(d):
-    """
-    Zwingt das Enddatum auf einen Freitag.
-    - Donnerstag -> Freitag (Aufrunden)
-    - Samstag/Sonntag -> Freitag (Zurückziehen)
-    - Montag/Dienstag/Mittwoch -> Vorheriger Freitag (Zurückziehen)
-    """
-    wd = d.weekday() # 0=Mo, ... 3=Do, 4=Fr, ... 6=So
-    
-    if wd == 4: # Ist schon Freitag
-        return d
-    elif wd == 3: # Donnerstag -> Aufrunden auf Freitag
-        return d + timedelta(days=1)
-    elif wd > 4: # Sa(5), So(6) -> Zurück auf Freitag
-        return d - timedelta(days=(wd - 4))
-    else: # Mo(0), Di(1), Mi(2) -> Zurück auf vorherigen Freitag
-        # Mo: -3 Tage = Fr
-        # Di: -4 Tage = Fr
-        # Mi: -5 Tage = Fr
-        return d - timedelta(days=(wd + 3))
+def get_friday_of_week(monday_date, weeks_duration=1):
+    return monday_date + timedelta(weeks=weeks_duration) - timedelta(days=3)
 
 def finde_naechsten_start(df, modul_kuerzel, ab_datum):
-    # Wir stellen sicher, dass wir ab einem Montag suchen
     ab_datum = get_next_monday(pd.to_datetime(ab_datum))
     
     if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
@@ -105,13 +99,12 @@ def berechne_kategorie_wechsel(plan):
 
 def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     plan = []
-    start_wunsch = pd.to_datetime(start_wunsch)
-    naechster_moeglicher_start = get_next_monday(start_wunsch)
+    current_monday = get_next_monday(pd.to_datetime(start_wunsch))
     
     # --- ONBOARDING (B4.0) ---
     if b40_aktiv:
-        b40_start = naechster_moeglicher_start - timedelta(days=3)
-        b40_ende = b40_start
+        b40_start = current_monday - timedelta(days=3) # Freitag
+        b40_ende = b40_start # 1 Tag
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -124,176 +117,109 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     total_gap_days = 0
     moeglich = True
     fehler_grund = ""
-    
     pmpx_im_paket = PRAXIS_MODUL in modul_reihenfolge
     pmpx_bereits_platziert = False
-
-    tz_saldo = 0.0
+    tz_guthaben_wochen = 0.0
     modul_counter = 0 
     
-    anzahl_module = len(modul_reihenfolge)
-
     for i, modul in enumerate(modul_reihenfolge):
-        
         while True:
-            naechster_moeglicher_start = get_next_monday(naechster_moeglicher_start)
-            
-            kurs = finde_naechsten_start(df, modul, naechster_moeglicher_start)
-            
+            kurs = finde_naechsten_start(df, modul, current_monday)
             if kurs is None:
                 moeglich = False
-                fehler_grund = f"Kein freier Termin für '{modul}' ab {naechster_moeglicher_start.strftime('%d.%m.%Y')} gefunden."
+                fehler_grund = f"Kein freier Termin für '{modul}' ab {current_monday.strftime('%d.%m.%Y')} gefunden."
                 break
             
             start = kurs['Startdatum']
             ende = kurs['Enddatum']
+            gap_days = (start - current_monday).days
+            gap_weeks = gap_days // 7
             
-            gap = (start - naechster_moeglicher_start).days
-            if gap < 0: gap = 0
-            
-            # ---------------------------------------------------------
-            # LOGIK: TEILZEIT
-            # ---------------------------------------------------------
+            # --- TEILZEIT LOGIK ---
             if ist_teilzeit:
-                
-                # A) NATÜRLICHE LÜCKE (Wartezeit)
-                if gap > 3 and tz_saldo >= 1:
-                    fill_duration = min(gap, tz_saldo, 28)
-                    
-                    if fill_duration >= 4:
-                        tz_start = naechster_moeglicher_start
-                        target_end = tz_start + timedelta(days=int(fill_duration))
-                        
-                        # Fix auf Freitag
-                        tz_ende_fixed = ensure_friday_end(target_end)
-                        
-                        # Wenn Fixierung dazu führt, dass wir vor dem Start landen -> erzwinge 1 Woche
-                        if tz_ende_fixed < tz_start:
-                             tz_ende_fixed = tz_start + timedelta(days=4) 
-                        
-                        # Kollision mit Kursstart prüfen
-                        if tz_ende_fixed >= start:
-                            tz_ende_fixed = start - timedelta(days=3)
-                        
+                if gap_weeks >= 1 and tz_guthaben_wochen >= 1:
+                    weeks_to_take = min(gap_weeks, int(tz_guthaben_wochen), 4)
+                    if weeks_to_take >= 1:
+                        tz_ende = get_friday_of_week(current_monday, weeks_to_take)
                         plan.append({
                             "Modul": "Teilzeit-Selbstlernphase (Wartezeit)",
                             "Kuerzel": "TZ-LERNEN",
-                            "Start": tz_start,
-                            "Ende": tz_ende_fixed,
+                            "Start": current_monday,
+                            "Ende": tz_ende,
                             "Wartetage_davor": 0,
                             "Kategorie": "Teilzeit"
                         })
-                        
-                        # Tatsächlichen Verbrauch berechnen (inkl Wochenende)
-                        used_days = (tz_ende_fixed - tz_start).days + 3
-                        
-                        tz_saldo -= used_days
-                        if tz_saldo < 0: tz_saldo = 0
-                        
-                        if used_days > 7: modul_counter = 0
-                            
-                        naechster_moeglicher_start = tz_ende_fixed + timedelta(days=3)
-                        continue 
-
-                # B) ZWANGSPAUSE
-                elif gap <= 3 and modul_counter >= 2 and tz_saldo >= 7:
-                    
-                    target_days = min(tz_saldo, 28)
-                    tz_start = naechster_moeglicher_start
-                    
-                    target_end = tz_start + timedelta(days=int(target_days))
-                    
-                    # Fix auf Freitag
-                    tz_ende_fixed = ensure_friday_end(target_end)
-                    
-                    if tz_ende_fixed < tz_start:
-                         tz_ende_fixed = tz_start + timedelta(days=4)
-
-                    plan.append({
-                        "Modul": "Teilzeit-Selbstlernphase",
-                        "Kuerzel": "TZ-LERNEN",
-                        "Start": tz_start,
-                        "Ende": tz_ende_fixed,
-                        "Wartetage_davor": 0,
-                        "Kategorie": "Teilzeit"
-                    })
-                    
-                    used_days = (tz_ende_fixed - tz_start).days + 3
-                    tz_saldo -= used_days
-                    if tz_saldo < 0: tz_saldo = 0
-                    
-                    modul_counter = 0
-                    naechster_moeglicher_start = tz_ende_fixed + timedelta(days=3)
-                    continue
-
-            # ---------------------------------------------------------
-            # LOGIK: VOLLZEIT
-            # ---------------------------------------------------------
-            elif gap > 3: 
-                darf_fuellen = (not pmpx_im_paket) or pmpx_bereits_platziert
-                if darf_fuellen:
-                    sl_start = naechster_moeglicher_start
-                    max_fill = gap - 3 
-                    if max_fill > 14: max_fill = 11
-                    
-                    if max_fill >= 4:
-                        sl_ende = sl_start + timedelta(days=max_fill)
-                        sl_ende = ensure_friday_end(sl_ende) # Auch hier nutzen wir die sichere Funktion
-                        
-                        plan.append({
-                            "Modul": "Indiv. Selbstlernphase",
-                            "Kuerzel": "SELBSTLERN",
-                            "Start": sl_start,
-                            "Ende": sl_ende,
-                            "Wartetage_davor": 0,
-                            "Kategorie": "Lückenfüller"
-                        })
-                        naechster_moeglicher_start = sl_ende + timedelta(days=3)
+                        tz_guthaben_wochen -= weeks_to_take
+                        if weeks_to_take > 1: modul_counter = 0
+                        current_monday = current_monday + timedelta(weeks=weeks_to_take)
                         continue
 
-            # ---------------------------------------------------------
-            # MODUL PLATZIEREN
-            # ---------------------------------------------------------
-            total_gap_days += gap
-            
+                elif gap_weeks == 0 and modul_counter >= 2 and tz_guthaben_wochen >= 1:
+                    weeks_to_take = min(int(tz_guthaben_wochen), 4)
+                    if weeks_to_take >= 1:
+                        tz_ende = get_friday_of_week(current_monday, weeks_to_take)
+                        plan.append({
+                            "Modul": "Teilzeit-Selbstlernphase",
+                            "Kuerzel": "TZ-LERNEN",
+                            "Start": current_monday,
+                            "Ende": tz_ende,
+                            "Wartetage_davor": 0,
+                            "Kategorie": "Teilzeit"
+                        })
+                        tz_guthaben_wochen -= weeks_to_take
+                        modul_counter = 0
+                        current_monday = current_monday + timedelta(weeks=weeks_to_take)
+                        continue
+
+            # --- VOLLZEIT LOGIK ---
+            elif gap_weeks >= 1:
+                darf_fuellen = (not pmpx_im_paket) or pmpx_bereits_platziert
+                if darf_fuellen:
+                    weeks_to_take = min(gap_weeks, 2)
+                    sl_ende = get_friday_of_week(current_monday, weeks_to_take)
+                    plan.append({
+                        "Modul": "Indiv. Selbstlernphase",
+                        "Kuerzel": "SELBSTLERN",
+                        "Start": current_monday,
+                        "Ende": sl_ende,
+                        "Wartetage_davor": 0,
+                        "Kategorie": "Lückenfüller"
+                    })
+                    current_monday = current_monday + timedelta(weeks=weeks_to_take)
+                    continue
+
+            # --- MODUL ---
+            total_gap_days += gap_days
             plan.append({
                 "Modul": kurs['Modulname'],
                 "Kuerzel": modul,
                 "Start": start,
                 "Ende": ende,
-                "Wartetage_davor": gap,
+                "Wartetage_davor": gap_days,
                 "Kategorie": MODUL_ZU_KAT.get(modul, "Sonstiges")
             })
             
             if ist_teilzeit:
-                dauer_modul = (ende - start).days + 1
-                verdienst = dauer_modul / 2
-                tz_saldo += verdienst
+                modul_dauer_wochen = ((ende - start).days + 3) // 7
+                tz_guthaben_wochen += (modul_dauer_wochen / 2)
                 modul_counter += 1
             
             if modul == PRAXIS_MODUL: pmpx_bereits_platziert = True
-            
-            naechster_moeglicher_start = get_next_monday(ende + timedelta(days=1))
+            current_monday = get_next_monday(ende + timedelta(days=1))
             break 
 
         if not moeglich: break
 
-    # --- ENDABRECHNUNG TEILZEIT (REST) ---
-    if moeglich and ist_teilzeit and tz_saldo >= 4:
-        
-        tz_start = naechster_moeglicher_start
-        target_end = tz_start + timedelta(days=int(tz_saldo))
-        
-        # Sicher auf Freitag enden
-        tz_ende_fixed = ensure_friday_end(target_end)
-        
-        # Nur eintragen wenn valide
-        if tz_ende_fixed >= tz_start:
+    # --- ENDABRECHNUNG TEILZEIT ---
+    if moeglich and ist_teilzeit and tz_guthaben_wochen >= 1:
+        weeks_left = int(tz_guthaben_wochen)
+        if weeks_left >= 1:
+            tz_ende = get_friday_of_week(current_monday, weeks_left)
             plan.append({
                 "Modul": "Teilzeit-Selbstlernphase (Abschluss)",
                 "Kuerzel": "TZ-LERNEN",
-                "Start": tz_start,
-                "Ende": tz_ende_fixed,
+                "Start": current_monday,
+                "Ende": tz_ende,
                 "Wartetage_davor": 0,
                 "Kategorie": "Teilzeit"
             })
@@ -331,17 +257,50 @@ def bewertung_sortierung(plan_info):
 # --- UI LOGIK ---
 
 st.title("🎓 mycareernow Angebotsplaner")
-st.write("Lade die Excel-Liste hoch (inkl. Spalten 'Klassenanzahl' und 'Teilnehmeranzahl').")
 
+# --- SIDEBAR: TEXT EDITOR ---
+st.sidebar.header("📝 Texte verwalten")
+st.sidebar.info("Hier kannst du die Snippets aus HubSpot einfügen. Sie werden automatisch gespeichert.")
+
+# Liste aller bekannten Kürzel (Standard + was schon in der Datei ist)
+all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
+for k_list in KATEGORIEN_MAPPING.values():
+    for k in k_list:
+        all_known_kuerzel.add(k)
+all_known_kuerzel.add("B4.0")
+all_known_kuerzel.add("SELBSTLERN")
+all_known_kuerzel.add("TZ-LERNEN")
+
+# Sortierte Liste für Dropdown
+sorted_kuerzel = sorted(list(all_known_kuerzel))
+
+# Editor Logik
+selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
+current_texts = load_texts()
+current_text_value = current_texts.get(selected_modul, "")
+
+new_text = st.sidebar.text_area(f"Text für {selected_modul} (Markdown/Text):", value=current_text_value, height=300)
+
+if st.sidebar.button("💾 Text Speichern"):
+    save_text(selected_modul, new_text)
+    st.sidebar.success(f"Text für {selected_modul} gespeichert!")
+    st.rerun() # Neuladen damit die Änderungen sofort wirksam sind
+
+# --- HAUPTBEREICH ---
+
+st.write("Lade die Excel-Liste hoch (Nur für Termine). Texte werden links verwaltet.")
 uploaded_file = st.file_uploader("Kursdaten (Excel) hochladen", type=["xlsx", "csv"])
 
 if uploaded_file:
     try:
+        # Kursdaten laden
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, sep=';')
         else:
-            df = pd.read_excel(uploaded_file)
-            
+            xls = pd.ExcelFile(uploaded_file)
+            df = pd.read_excel(xls, sheet_name=0) 
+
+        # Bereinigung
         df.columns = [c.strip() for c in df.columns]
         df['Startdatum'] = pd.to_datetime(df['Startdatum'], dayfirst=True)
         df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
@@ -412,6 +371,7 @@ if uploaded_file:
                         
                         st.success(f"Angebot erstellt! (Teilzeit: {'JA' if is_teilzeit else 'NEIN'})")
                         
+                        # --- TABELLE ANZEIGEN ---
                         display_data = []
                         for item in bester['plan']:
                             start_str = item['Start'].strftime('%d.%m.%Y')
@@ -420,7 +380,7 @@ if uploaded_file:
                             if item['Kuerzel'] == "SELBSTLERN": hinweis = "🔹 Lückenfüller"
                             elif item['Kuerzel'] == "TZ-LERNEN": hinweis = "⏱️ Teilzeit-Lernen"
                             elif item['Kuerzel'] == "B4.0": hinweis = "🚀 Onboarding"
-                            elif item['Wartetage_davor'] > 3: hinweis = f"⚠️ {item['Wartetage_davor']} Tage Rest-Lücke (Guthaben leer)"
+                            elif item['Wartetage_davor'] > 3: hinweis = f"⚠️ {item['Wartetage_davor']} Tage Rest-Lücke"
                             
                             display_data.append({
                                 "Kategorie": item['Kategorie'],
@@ -429,21 +389,42 @@ if uploaded_file:
                                 "Modul": item['Modul'],
                                 "Info": hinweis
                             })
-                        
                         st.table(display_data)
+
+                        # --- HUBSPOT VORSCHAU ---
+                        st.subheader("📋 Vorschau für HubSpot (Markieren & Kopieren)")
+                        st.info("👇 Markiere den Text im Kasten unten einfach mit der Maus (so wie auf einer Webseite) und kopiere ihn. HubSpot versteht diese Formatierung.")
                         
-                        kuerzel_liste_text = []
-                        for item in bester['plan']:
-                            if item['Kuerzel'] == "SELBSTLERN": kuerzel_liste_text.append("Selbstlernphase")
-                            elif item['Kuerzel'] == "TZ-LERNEN": kuerzel_liste_text.append("TZ-Lernen")
-                            else: kuerzel_liste_text.append(item['Kuerzel'])
-                        
-                        final_text = (
-                            f"Gesamtzeitraum: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}\n\n"
-                            f"Modul-Abfolge:\n"
-                            f"{' -> '.join(kuerzel_liste_text)}"
-                        )
-                        st.text_area("Kompakte Daten (für E-Mail/Word):", final_text, height=150)
+                        TEXT_MAPPING = load_texts()
+
+                        with st.container(border=True):
+                            # Header
+                            st.markdown(f"**Gesamtzeitraum:** {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}")
+                            if is_teilzeit:
+                                st.markdown("*(Teilzeit-Modell)*")
+                            st.markdown("---")
+                            
+                            # Module
+                            for item in bester['plan']:
+                                k = item['Kuerzel']
+                                start_s = item['Start'].strftime('%d.%m.%Y')
+                                ende_s = item['Ende'].strftime('%d.%m.%Y')
+                                modul_name = item['Modul']
+                                
+                                # Text laden
+                                beschreibung = TEXT_MAPPING.get(k, "")
+                                if not beschreibung:
+                                    # Standardtexte falls leer
+                                    if k == "B4.0": beschreibung = "Einführung in den virtuellen Klassenraum."
+                                    elif k == "SELBSTLERN": beschreibung = "Individuelle Selbstlernphase."
+                                    elif k == "TZ-LERNEN": beschreibung = "Teilzeit-Selbstlernphase."
+                                    else: beschreibung = "_Keine Beschreibung hinterlegt._"
+
+                                # RENDER BLOCK
+                                # Wir nutzen HTML/Markdown Mix für beste Optik
+                                st.markdown(f"#### 🗓️ {start_s} - {ende_s} | {modul_name} ({k})")
+                                st.markdown(beschreibung)
+                                st.markdown("---")
 
     except Exception as e:
         st.error(f"Fehler beim Lesen der Datei: {e}")
