@@ -11,7 +11,7 @@ from streamlit_quill import st_quill
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
 
-# Locale setzen
+# Locale setzen (Versuch auf Deutsch für Wochentage)
 try:
     locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
 except:
@@ -24,9 +24,8 @@ MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 ADMIN_PASSWORD = "mycarrEer.admin!186"
 
-# ABHÄNGIGKEITEN DEFINITION
-# String = Muss zwingend vorher da sein
-# Tuple = EINES davon muss zwingend vorher da sein (OR-Logik)
+# --- ABHÄNGIGKEITEN ---
+# WICHTIG: 2wo_PMPX akzeptiert jetzt PSM1 ODER IPMA
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
@@ -36,7 +35,7 @@ ABHAENGIGKEITEN = {
     "PAL-E": "PSM1",
     "PAL-EBM": "PSM1",
     "AKI-EX": "AKI",
-    "2wo_PMPX": ("PSM1", "IPMA") # NEU: PSM1 ODER IPMA muss vorher absolviert sein
+    "2wo_PMPX": ("PSM1", "IPMA") # Tuple bedeutet: Eines von beiden reicht
 }
 
 KATEGORIEN_MAPPING = {
@@ -83,6 +82,7 @@ def get_friday_of_week(monday_date, weeks_duration=1):
     return monday_date + timedelta(weeks=weeks_duration) - timedelta(days=3)
 
 def finde_naechsten_start(df, modul_kuerzel, ab_datum):
+    # Sicherstellen, dass wir ab einem Montag suchen
     ab_datum = get_next_monday(pd.to_datetime(ab_datum))
     
     if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
@@ -119,8 +119,9 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     
     # --- ONBOARDING (B4.0) ---
     if b40_aktiv:
-        b40_start = current_monday - timedelta(days=3) # Freitag
-        b40_ende = b40_start # 1 Tag
+        # B4.0 findet am Freitag VOR dem Start statt
+        b40_start = current_monday - timedelta(days=3) 
+        b40_ende = b40_start 
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -256,9 +257,6 @@ def ist_reihenfolge_gueltig(reihenfolge):
             
             # Fall 2: Single-Logik (String) - z.B. PSPO1 braucht PSM1
             elif isinstance(voraussetzung, str):
-                # Wenn die Voraussetzung überhaupt im Plan vorkommt (Auswahl), 
-                # dann muss sie zwingend VORHER kommen.
-                # Achtung: Wenn sie gar nicht ausgewählt ist, greift check_fehlende_voraussetzungen
                 if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
                     return False
                     
@@ -312,6 +310,7 @@ def bewertung_sortierung(plan_info):
     if "PSM1" in idx and "PSPO1" in idx:
         if idx["PSM1"] > idx["PSPO1"]: soft_score += 20
 
+    # SORTIERSCHLÜSSEL: (Gaps, Soft-Score, Switches)
     return (plan_info['gaps'], soft_score, plan_info['switches'])
 
 # --- UI LOGIK ---
