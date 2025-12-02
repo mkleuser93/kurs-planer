@@ -12,7 +12,7 @@ st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wi
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 
-# KORREKTUR: IT-TOOLS hat keine Abhängigkeit mehr
+# Abhängigkeiten (IT-TOOLS ist befreit)
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1",
@@ -247,13 +247,47 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
                 fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
     return fehler_liste
 
+# --- NEUE SORTIER-LOGIK ---
 def bewertung_sortierung(plan_info):
+    """
+    Berechnet einen Score für den Plan.
+    Kleiner Score = Besser.
+    Sortierung:
+    1. Gaps (Lücken minimieren)
+    2. Switches (Themenwechsel minimieren)
+    3. Heuristik-Score (Wunsch-Reihenfolge)
+    """
+    
+    # Liste der echten Module extrahieren (ohne Pausen)
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
-    try:
-        pmpx_index = echte_module.index(PRAXIS_MODUL)
-    except ValueError:
-        pmpx_index = -1 
-    return (plan_info['gaps'], plan_info['switches'], -pmpx_index)
+    
+    # Dictionary mit Index-Positionen erstellen: {'PSM1': 0, 'AKI': 1 ...}
+    idx = {mod: i for i, mod in enumerate(echte_module)}
+    
+    soft_score = 0
+    
+    # 1. HEURISTIK: PSPO1 und PMPX sollten VOR PAL stehen
+    pals = ["PAL-E", "PAL-EBM"]
+    referenz_module_fuer_vorne = ["PSPO1", "2wo_PMPX"]
+    
+    for pal in pals:
+        if pal in idx:
+            for ref in referenz_module_fuer_vorne:
+                if ref in idx:
+                    # Wenn PAL VOR dem Referenzmodul steht -> Strafe (+50)
+                    if idx[pal] < idx[ref]:
+                        soft_score += 50
+    
+    # 2. HEURISTIK: Module die weit nach hinten sollen
+    # Je weiter hinten (höherer Index), desto mehr ziehen wir vom Score ab.
+    # IT-TOOLS, PAL-E, PAL-EBM
+    late_bloomers = ["IT-TOOLS", "PAL-E", "PAL-EBM"]
+    for l in late_bloomers:
+        if l in idx:
+            # Index abziehen (Position 5 ist besser als Position 0)
+            soft_score -= idx[l]
+
+    return (plan_info['gaps'], plan_info['switches'], soft_score)
 
 # --- UI LOGIK ---
 
@@ -271,6 +305,7 @@ for k_list in KATEGORIEN_MAPPING.values():
 all_known_kuerzel.add("B4.0")
 all_known_kuerzel.add("SELBSTLERN")
 all_known_kuerzel.add("TZ-LERNEN")
+# IT-TOOLS ist via KATEGORIEN_MAPPING schon drin
 
 sorted_kuerzel = sorted(list(all_known_kuerzel))
 
