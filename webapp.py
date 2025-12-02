@@ -14,9 +14,11 @@ MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 ADMIN_PASSWORD = "mycarrEer.admin!186"
 
+# Abhängigkeiten: Hier nur die wirklich harten, technischen Voraussetzungen
+# Alles "Wünschenswerte" regeln wir über das Scoring, nicht über harte Sperren.
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
-    "PSPO1": "PSM1",
+    "PSPO1": "PSM1", # PSPO1 baut inhaltlich auf PSM1 auf
     "PSPO2": "PSM1",
     "SPS": "PSM1",
     "PSK": "PSM1",
@@ -248,26 +250,53 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
                 fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
     return fehler_liste
 
+# --- SCORE LOGIK (PRIORITÄT: KEINE LÜCKEN) ---
 def bewertung_sortierung(plan_info):
+    """
+    Sortierungskriterien:
+    1. Lücken (total_gap_days) -> MUSS MINIMAL SEIN (Prio 1)
+    2. Soft Score (Logische Reihenfolge) -> Prio 2
+    """
+    
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
+    
     soft_score = 0
     
-    # PAL Logik
+    # HEURISTIK: Wünsche an die Reihenfolge
+    # Diese Punkte zählen NUR, wenn die Lückenanzahl bei zwei Plänen IDENTISCH ist.
+    
+    # A) PMPX und PSPO1 sollten möglichst VOR den PAL-Modulen sein
     pals = ["PAL-E", "PAL-EBM"]
     referenz_module_fuer_vorne = ["PSPO1", "2wo_PMPX"]
+    
     for pal in pals:
         if pal in idx:
             for ref in referenz_module_fuer_vorne:
                 if ref in idx:
-                    if idx[pal] < idx[ref]: soft_score += 50
+                    # Wenn PAL VOR dem Referenzmodul steht -> "Strafe"
+                    if idx[pal] < idx[ref]:
+                        soft_score += 50
     
-    # Late Bloomers
+    # B) Late Bloomers: Diese Module sollen möglichst weit hinten stehen
     late_bloomers = ["IT-TOOLS", "PAL-E", "PAL-EBM"]
     for l in late_bloomers:
-        if l in idx: soft_score -= idx[l]
+        if l in idx:
+            # Je höher der Index (desto später), desto besser.
+            # Wir ziehen den Index vom Score ab (niedriger Score gewinnt).
+            soft_score -= idx[l]
 
-    return (plan_info['gaps'], plan_info['switches'], soft_score)
+    # C) Projektmanagement Basics: PSM1 sollte vor PSPO1 kommen
+    if "PSM1" in idx and "PSPO1" in idx:
+        if idx["PSM1"] > idx["PSPO1"]:
+            soft_score += 20 # Strafe wenn Reihenfolge falsch
+
+    # RÜCKGABE TUPEL FÜR SORTIERUNG
+    # Python sortiert Tuples elementweise.
+    # 1. Element: gaps (Absolut wichtigstes Kriterium)
+    # 2. Element: soft_score (Zweitwichtigstes: Logik/Wünsche)
+    # 3. Element: switches (Drittwichtigstes: Wenig Themenwechsel)
+    return (plan_info['gaps'], soft_score, plan_info['switches'])
 
 # --- UI LOGIK ---
 
@@ -276,7 +305,6 @@ st.title("🎓 mycareernow Angebotsplaner")
 # --- SIDEBAR: LOGIN & EDITOR ---
 st.sidebar.header("📝 Texte verwalten")
 
-# Session State initialisieren
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
@@ -288,17 +316,15 @@ if not st.session_state.is_admin:
         if password == ADMIN_PASSWORD:
             st.session_state.is_admin = True
             st.rerun()
-        else:
+        elif password != "":
             st.sidebar.error("Falsches Passwort")
 else:
-    # --- ADMIN BEREICH (NUR SICHTBAR NACH LOGIN) ---
     st.sidebar.success("🔓 Admin-Modus aktiv")
     if st.sidebar.button("Logout"):
         st.session_state.is_admin = False
         st.rerun()
 
     st.sidebar.markdown("---")
-    st.sidebar.write("**Texte bearbeiten:**")
     
     all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
     for k_list in KATEGORIEN_MAPPING.values():
@@ -374,7 +400,7 @@ if uploaded_file:
                 if fehlende_voraussetzungen and ignore_deps:
                     st.warning(f"Ignoriere Abhängigkeiten: {', '.join(fehlende_voraussetzungen)}")
 
-                with st.spinner("Berechne beste Kombination..."):
+                with st.spinner("Berechne beste Kombination (Priorität: Lückenlosigkeit)..."):
                     gueltige_plaene = []
                     
                     for reihenfolge in itertools.permutations(gewuenschte_module):
@@ -398,6 +424,11 @@ if uploaded_file:
                         
                         st.success(f"Angebot erstellt! (Gesamt: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')})")
                         
+                        if bester['gaps'] > 0:
+                            st.warning(f"Achtung: Dieser Plan enthält insgesamt {bester['gaps']} Tage Lücke, die nicht sinnvoll gefüllt werden konnten. (Bestes Ergebnis)")
+                        else:
+                            st.info("✅ Dieser Plan ist vollständig lückenlos.")
+
                         # --- TABELLE ZUR KONTROLLE ---
                         display_data = []
                         for item in bester['plan']:
@@ -407,6 +438,7 @@ if uploaded_file:
                             if item['Kuerzel'] == "SELBSTLERN": hinweis = "🔹 Lückenfüller"
                             elif item['Kuerzel'] == "TZ-LERNEN": hinweis = "⏱️ Teilzeit-Lernen"
                             elif item['Kuerzel'] == "B4.0": hinweis = "🚀 Onboarding"
+                            elif item['Wartetage_davor'] > 3: hinweis = f"⚠️ {item['Wartetage_davor']} Tage Gap"
                             
                             display_data.append({
                                 "Kategorie": item['Kategorie'],
