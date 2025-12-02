@@ -4,6 +4,7 @@ from datetime import timedelta, date
 import itertools
 import json
 import os
+from streamlit_quill import st_quill
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
@@ -41,7 +42,7 @@ for kat, module in KATEGORIEN_MAPPING.items():
 
 PRAXIS_MODUL = "2wo_PMPX"
 
-# --- HELPER FUNKTIONEN (TEXTE LADEN/SPEICHERN) ---
+# --- HELPER FUNKTIONEN (TEXTE) ---
 
 def load_texts():
     if not os.path.exists(TEXT_FILE):
@@ -103,8 +104,8 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     
     # --- ONBOARDING (B4.0) ---
     if b40_aktiv:
-        b40_start = current_monday - timedelta(days=3) # Freitag
-        b40_ende = b40_start # 1 Tag
+        b40_start = current_monday - timedelta(days=3)
+        b40_ende = b40_start
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -210,7 +211,6 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
 
         if not moeglich: break
 
-    # --- ENDABRECHNUNG TEILZEIT ---
     if moeglich and ist_teilzeit and tz_guthaben_wochen >= 1:
         weeks_left = int(tz_guthaben_wochen)
         if weeks_left >= 1:
@@ -258,11 +258,11 @@ def bewertung_sortierung(plan_info):
 
 st.title("🎓 mycareernow Angebotsplaner")
 
-# --- SIDEBAR: TEXT EDITOR ---
+# --- SIDEBAR: RICHTEXT EDITOR ---
 st.sidebar.header("📝 Texte verwalten")
-st.sidebar.info("Hier kannst du die Snippets aus HubSpot einfügen. Sie werden automatisch gespeichert.")
+st.sidebar.info("Kopiere die Texte direkt formatiert aus HubSpot hier rein.")
 
-# Liste aller bekannten Kürzel (Standard + was schon in der Datei ist)
+# Liste aller bekannten Kürzel
 all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
 for k_list in KATEGORIEN_MAPPING.values():
     for k in k_list:
@@ -271,20 +271,24 @@ all_known_kuerzel.add("B4.0")
 all_known_kuerzel.add("SELBSTLERN")
 all_known_kuerzel.add("TZ-LERNEN")
 
-# Sortierte Liste für Dropdown
 sorted_kuerzel = sorted(list(all_known_kuerzel))
 
-# Editor Logik
 selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
 current_texts = load_texts()
 current_text_value = current_texts.get(selected_modul, "")
 
-new_text = st.sidebar.text_area(f"Text für {selected_modul} (Markdown/Text):", value=current_text_value, height=300)
+# DER NEUE EDITOR (Quill)
+# Dieser Editor behält Fett, Kursiv, Listen, etc.
+new_text_html = st_quill(
+    value=current_text_value, 
+    html=True, 
+    key=f"quill_{selected_modul}",
+    placeholder="Hier formatierten Text aus HubSpot einfügen..."
+)
 
 if st.sidebar.button("💾 Text Speichern"):
-    save_text(selected_modul, new_text)
+    save_text(selected_modul, new_text_html)
     st.sidebar.success(f"Text für {selected_modul} gespeichert!")
-    st.rerun() # Neuladen damit die Änderungen sofort wirksam sind
 
 # --- HAUPTBEREICH ---
 
@@ -293,14 +297,12 @@ uploaded_file = st.file_uploader("Kursdaten (Excel) hochladen", type=["xlsx", "c
 
 if uploaded_file:
     try:
-        # Kursdaten laden
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, sep=';')
         else:
             xls = pd.ExcelFile(uploaded_file)
             df = pd.read_excel(xls, sheet_name=0) 
 
-        # Bereinigung
         df.columns = [c.strip() for c in df.columns]
         df['Startdatum'] = pd.to_datetime(df['Startdatum'], dayfirst=True)
         df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
@@ -371,7 +373,6 @@ if uploaded_file:
                         
                         st.success(f"Angebot erstellt! (Teilzeit: {'JA' if is_teilzeit else 'NEIN'})")
                         
-                        # --- TABELLE ANZEIGEN ---
                         display_data = []
                         for item in bester['plan']:
                             start_str = item['Start'].strftime('%d.%m.%Y')
@@ -391,18 +392,18 @@ if uploaded_file:
                             })
                         st.table(display_data)
 
-                        # --- HUBSPOT VORSCHAU ---
-                        st.subheader("📋 Vorschau für HubSpot (Markieren & Kopieren)")
-                        st.info("👇 Markiere den Text im Kasten unten einfach mit der Maus (so wie auf einer Webseite) und kopiere ihn. HubSpot versteht diese Formatierung.")
+                        # --- HUBSPOT READY OUTPUT ---
+                        st.subheader("📋 Fertiges Angebot für HubSpot")
+                        st.info("👇 Unten ist das fertige Angebot. Du kannst es markieren, kopieren und in HubSpot einfügen. Die Formatierung (Fett, Listen) bleibt erhalten!")
                         
                         TEXT_MAPPING = load_texts()
 
                         with st.container(border=True):
-                            # Header
-                            st.markdown(f"**Gesamtzeitraum:** {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}")
+                            # Header (HTML gerendert)
+                            st.markdown(f"**Gesamtzeitraum:** {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')}", unsafe_allow_html=True)
                             if is_teilzeit:
-                                st.markdown("*(Teilzeit-Modell)*")
-                            st.markdown("---")
+                                st.markdown("*(Teilzeit-Modell)*", unsafe_allow_html=True)
+                            st.markdown("<hr>", unsafe_allow_html=True)
                             
                             # Module
                             for item in bester['plan']:
@@ -411,23 +412,24 @@ if uploaded_file:
                                 ende_s = item['Ende'].strftime('%d.%m.%Y')
                                 modul_name = item['Modul']
                                 
-                                # Text laden
-                                beschreibung = TEXT_MAPPING.get(k, "")
-                                if not beschreibung:
-                                    # Standardtexte falls leer
-                                    if k == "B4.0": beschreibung = "Einführung in den virtuellen Klassenraum."
-                                    elif k == "SELBSTLERN": beschreibung = "Individuelle Selbstlernphase."
-                                    elif k == "TZ-LERNEN": beschreibung = "Teilzeit-Selbstlernphase."
-                                    else: beschreibung = "_Keine Beschreibung hinterlegt._"
+                                # Beschreibung (HTML) laden
+                                beschreibung_html = TEXT_MAPPING.get(k, "")
+                                
+                                if not beschreibung_html:
+                                    if k == "B4.0": beschreibung_html = "<p>Einführung in den virtuellen Klassenraum.</p>"
+                                    elif k == "SELBSTLERN": beschreibung_html = "<p>Individuelle Selbstlernphase.</p>"
+                                    elif k == "TZ-LERNEN": beschreibung_html = "<p>Teilzeit-Selbstlernphase.</p>"
+                                    else: beschreibung_html = "<p><i>Keine Beschreibung hinterlegt.</i></p>"
 
                                 # RENDER BLOCK
-                                # Wir nutzen HTML/Markdown Mix für beste Optik
-                                st.markdown(f"#### 🗓️ {start_s} - {ende_s} | {modul_name} ({k})")
-                                st.markdown(beschreibung)
-                                st.markdown("---")
+                                # Wir nutzen unsafe_allow_html=True, damit die HTML-Tags aus dem Editor 
+                                # (<b>, <ul>, etc.) auch wirklich als Fett/Liste angezeigt werden.
+                                st.markdown(f"<h4>🗓️ {start_s} - {ende_s} | {modul_name} ({k})</h4>", unsafe_allow_html=True)
+                                st.markdown(beschreibung_html, unsafe_allow_html=True)
+                                st.markdown("<hr>", unsafe_allow_html=True)
 
     except Exception as e:
-        st.error(f"Fehler beim Lesen der Datei: {e}")
+        st.error(f"Fehler: {e}")
 
 else:
     st.info("Bitte lade zuerst die kursdaten.xlsx hoch.")
