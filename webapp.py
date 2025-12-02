@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from datetime import timedelta, date
 import itertools
-import math
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅")
@@ -39,10 +38,32 @@ for kat, module in KATEGORIEN_MAPPING.items():
 
 PRAXIS_MODUL = "2wo_PMPX"
 
-# --- FUNKTIONEN ---
+# --- HELPER FUNKTIONEN (DATUM) ---
+
+def get_next_monday(d):
+    """Schiebt ein Datum auf den nächsten Montag, falls es Sa/So ist."""
+    # weekday(): Mon=0, Sun=6
+    wd = d.weekday()
+    if wd == 5: # Samstag
+        return d + timedelta(days=2)
+    elif wd == 6: # Sonntag
+        return d + timedelta(days=1)
+    return d
+
+def get_previous_friday(d):
+    """Schiebt ein Datum auf den vorherigen Freitag zurück, falls es Sa/So/Mon ist (für Enddaten)."""
+    wd = d.weekday()
+    if wd == 5: # Samstag -> Freitag
+        return d - timedelta(days=1)
+    elif wd == 6: # Sonntag -> Freitag
+        return d - timedelta(days=2)
+    elif wd == 0: # Montag -> Freitag (der Vorwoche)
+        return d - timedelta(days=3)
+    return d
 
 def finde_naechsten_start(df, modul_kuerzel, ab_datum):
-    ab_datum = pd.to_datetime(ab_datum)
+    # Wir stellen sicher, dass wir ab einem Montag suchen, falls ab_datum am Wochenende liegt
+    ab_datum = get_next_monday(pd.to_datetime(ab_datum))
     
     if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
         moegliche_termine = df[
@@ -75,11 +96,19 @@ def berechne_kategorie_wechsel(plan):
 def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     plan = []
     start_wunsch = pd.to_datetime(start_wunsch)
-    naechster_moeglicher_start = start_wunsch
+    naechster_moeglicher_start = get_next_monday(start_wunsch)
     
-    # --- ONBOARDING ---
+    # --- ONBOARDING (B4.0) ---
     if b40_aktiv:
-        b40_start = start_wunsch - timedelta(days=3)
+        # B4.0 findet Fr/Sa/So/Mo statt? Nein, 1 Tag.
+        # Regel: 3 Tage VOR Start. 
+        # Wenn Start = Montag 09.02., dann B4.0 = Freitag 06.02.
+        # Rechnung: Montag - 3 Tage = Freitag. Perfekt.
+        
+        b40_start = naechster_moeglicher_start - timedelta(days=3)
+        # Wenn b40_start auf Sa/So fällt (unwahrscheinlich bei Mo-Start), anpassen?
+        # Wir lassen die -3 Tage Regel fix, da sie meistens Fr trifft.
+        
         b40_ende = b40_start
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
@@ -97,17 +126,17 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     pmpx_im_paket = PRAXIS_MODUL in modul_reihenfolge
     pmpx_bereits_platziert = False
 
-    # --- TEILZEIT VARIABLEN ---
-    tz_saldo = 0.0      # Guthaben in TAGEN
-    modul_counter = 0   # Module seit letzter Pause
+    tz_saldo = 0.0
+    modul_counter = 0 
     
     anzahl_module = len(modul_reihenfolge)
 
     for i, modul in enumerate(modul_reihenfolge):
         
-        # Schleife: Wir versuchen das Modul zu platzieren.
-        # Wenn wir eine Pause einschieben müssen/können, tun wir das und prüfen DANN nochmal den Termin.
         while True:
+            # Stelle sicher, dass wir ab einem Montag suchen
+            naechster_moeglicher_start = get_next_monday(naechster_moeglicher_start)
+            
             kurs = finde_naechsten_start(df, modul, naechster_moeglicher_start)
             
             if kurs is None:
@@ -115,10 +144,9 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
                 fehler_grund = f"Kein freier Termin für '{modul}' ab {naechster_moeglicher_start.strftime('%d.%m.%Y')} gefunden."
                 break
             
-            start = kurs['Startdatum']
-            ende = kurs['Enddatum']
+            start = kurs['Startdatum'] # Ist in Excel hoffentlich immer Montag
+            ende = kurs['Enddatum']    # Ist in Excel hoffentlich immer Freitag
             
-            # Lücke zum Kursstart
             gap = (start - naechster_moeglicher_start).days
             if gap < 0: gap = 0
             
@@ -127,94 +155,124 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
             # ---------------------------------------------------------
             if ist_teilzeit:
                 
-                # A) PRÜFUNG: NATÜRLICHE LÜCKE FÜLLEN
-                # Wenn wir auf den Kurs warten müssen (> 3 Tage), nutzen wir das Guthaben, falls vorhanden.
+                # A) NATÜRLICHE LÜCKE (Wartezeit)
                 if gap > 3 and tz_saldo >= 1:
-                    # Wir füllen maximal so viel, wie die Lücke ist, 
-                    # ABER AUCH maximal so viel wir Guthaben haben,
-                    # UND maximal 28 Tage am Stück.
-                    
+                    # Wir nutzen Guthaben. 
+                    # Max 28 Tage, Max Saldo, Max Gap.
                     fill_duration = min(gap, tz_saldo, 28)
                     
-                    # Nur einfügen wenn es sich lohnt (>= 1 Tag)
-                    if fill_duration >= 1:
-                        tz_ende_pause = naechster_moeglicher_start + timedelta(days=int(fill_duration) - 1)
+                    if fill_duration >= 4: # Mindestens fast eine Woche
+                        # Berechne Ende: Start + Dauer.
+                        # Aber das Ende muss ein Freitag sein.
+                        
+                        tz_start = naechster_moeglicher_start # Ist Montag
+                        
+                        # Ziel-Ende berechnen
+                        target_end = tz_start + timedelta(days=int(fill_duration))
+                        # Einrasten auf vorherigen Freitag
+                        tz_ende_fixed = get_previous_friday(target_end)
+                        
+                        # Sicherstellen, dass wir nicht vor dem Start enden (Min. Mo-Fr)
+                        if tz_ende_fixed < tz_start:
+                             tz_ende_fixed = tz_start + timedelta(days=4) # Zwinge 1 Woche
+                        
+                        # Check: Kollidiert das mit dem Kursstart?
+                        if tz_ende_fixed >= start:
+                            # Pause ist zu lang für die Lücke durch das Einrasten.
+                            # Wir verkürzen auf den Freitag VOR dem Kursstart.
+                            tz_ende_fixed = start - timedelta(days=3)
                         
                         plan.append({
                             "Modul": "Teilzeit-Selbstlernphase (Wartezeit)",
                             "Kuerzel": "TZ-LERNEN",
-                            "Start": naechster_moeglicher_start,
-                            "Ende": tz_ende_pause,
+                            "Start": tz_start,
+                            "Ende": tz_ende_fixed,
                             "Wartetage_davor": 0,
                             "Kategorie": "Teilzeit"
                         })
                         
-                        # Saldo reduzieren
-                        tz_saldo -= fill_duration
+                        # Tatsächlich verbrauchte Tage (Kalendertage für Saldo)
+                        # Wir berechnen Saldo einfach: Neue Startposition - Alte Startposition
+                        used_days = (tz_ende_fixed - tz_start).days + 3 # +3 um bis zum nächsten Montag zu kommen
                         
-                        # Wir haben eine Pause gemacht -> Counter Reset
-                        if fill_duration > 7: 
-                            modul_counter = 0
+                        tz_saldo -= used_days
+                        if tz_saldo < 0: tz_saldo = 0
+                        
+                        if used_days > 7: modul_counter = 0
                             
-                        # Nächster Start verschiebt sich
-                        naechster_moeglicher_start = tz_ende_pause + timedelta(days=1)
-                        
-                        # WICHTIG: Gap hat sich verkleinert. Wir müssen die While-Schleife neu starten,
-                        # um zu prüfen, ob der Kurs jetzt passt oder ob noch Rest-Gap übrig ist (den wir nicht füllen konnten).
+                        # Weiter am nächsten Montag
+                        naechster_moeglicher_start = tz_ende_fixed + timedelta(days=3)
                         continue 
 
-                # B) PRÜFUNG: ZWANGSPAUSE EINSCHIEBEN (nach 2 Modulen)
-                # Wir schieben nur eine Pause ein, wenn KEINE natürliche Lücke da ist (gap <= 3)
-                # UND wir genug Guthaben haben (> 1 Woche, damit es sich lohnt)
-                # UND wir 2 Module voll haben.
+                # B) ZWANGSPAUSE
                 elif gap <= 3 and modul_counter >= 2 and tz_saldo >= 7:
                     
-                    pause_tage = min(tz_saldo, 28) # Max 4 Wochen
+                    # Wir wollen ca. 4 Wochen (28 Tage) oder Saldo
+                    target_days = min(tz_saldo, 28)
                     
-                    tz_ende_pause = naechster_moeglicher_start + timedelta(days=int(pause_tage) - 1)
+                    tz_start = naechster_moeglicher_start # Ist Montag
+                    target_end = tz_start + timedelta(days=int(target_days))
                     
+                    # Auf Freitag einrasten
+                    tz_ende_fixed = get_previous_friday(target_end)
+                    
+                    # Min 1 Woche
+                    if tz_ende_fixed < tz_start:
+                         tz_ende_fixed = tz_start + timedelta(days=4)
+
                     plan.append({
                         "Modul": "Teilzeit-Selbstlernphase",
                         "Kuerzel": "TZ-LERNEN",
-                        "Start": naechster_moeglicher_start,
-                        "Ende": tz_ende_pause,
+                        "Start": tz_start,
+                        "Ende": tz_ende_fixed,
                         "Wartetage_davor": 0,
                         "Kategorie": "Teilzeit"
                     })
                     
-                    tz_saldo -= pause_tage
-                    modul_counter = 0
-                    naechster_moeglicher_start = tz_ende_pause + timedelta(days=1)
+                    used_days = (tz_ende_fixed - tz_start).days + 3
+                    tz_saldo -= used_days
+                    if tz_saldo < 0: tz_saldo = 0
                     
-                    # Nach der Zwangspause müssen wir den Kurs termin neu suchen
+                    modul_counter = 0
+                    naechster_moeglicher_start = tz_ende_fixed + timedelta(days=3)
                     continue
 
             # ---------------------------------------------------------
-            # LOGIK: VOLLZEIT (Lückenfüller)
+            # LOGIK: VOLLZEIT
             # ---------------------------------------------------------
             elif gap > 3: 
                 darf_fuellen = (not pmpx_im_paket) or pmpx_bereits_platziert
                 if darf_fuellen:
-                    dauer_tage = min(gap, 14)
+                    # Vollzeit Lückenfüller: Immer Mo-Fr
+                    # Wir füllen max 2 Wochen (14 Tage)
+                    # Gap = Tage bis Start (z.B. 14 Tage).
+                    
                     sl_start = naechster_moeglicher_start
-                    sl_ende = sl_start + timedelta(days=dauer_tage)
-                    plan.append({
-                        "Modul": "Indiv. Selbstlernphase",
-                        "Kuerzel": "SELBSTLERN",
-                        "Start": sl_start,
-                        "Ende": sl_ende,
-                        "Wartetage_davor": 0,
-                        "Kategorie": "Lückenfüller"
-                    })
-                    naechster_moeglicher_start = sl_ende + timedelta(days=1)
-                    continue
+                    
+                    # Ziel: Lücke füllen, aber am Freitag enden
+                    # Max Fülldauer = Lücke - 3 Tage (damit wir Freitag enden vor Montag Start)
+                    max_fill = gap - 3 
+                    if max_fill > 14: max_fill = 11 # Max 2 Wochen (Mo-Fr nächste Woche)
+                    
+                    if max_fill >= 4: # Lohnt sich nur für >= 1 Woche
+                        sl_ende = sl_start + timedelta(days=max_fill)
+                        # Sicherstellen dass es Freitag ist
+                        sl_ende = get_previous_friday(sl_ende)
+                        
+                        plan.append({
+                            "Modul": "Indiv. Selbstlernphase",
+                            "Kuerzel": "SELBSTLERN",
+                            "Start": sl_start,
+                            "Ende": sl_ende,
+                            "Wartetage_davor": 0,
+                            "Kategorie": "Lückenfüller"
+                        })
+                        naechster_moeglicher_start = sl_ende + timedelta(days=3)
+                        continue
 
             # ---------------------------------------------------------
-            # MODUL PLATZIEREN (Wenn wir hier ankommen, wird gebucht)
+            # MODUL PLATZIEREN
             # ---------------------------------------------------------
-            
-            # Falls bei Teilzeit noch ein Gap übrig ist (weil Guthaben leer war),
-            # wird dieser Gap hier als "Wartetage_davor" registriert und rot angezeigt.
             total_gap_days += gap
             
             plan.append({
@@ -226,7 +284,6 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
                 "Kategorie": MODUL_ZU_KAT.get(modul, "Sonstiges")
             })
             
-            # Guthaben verdienen
             if ist_teilzeit:
                 dauer_modul = (ende - start).days + 1
                 verdienst = dauer_modul / 2
@@ -235,23 +292,28 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
             
             if modul == PRAXIS_MODUL: pmpx_bereits_platziert = True
             
-            naechster_moeglicher_start = ende + timedelta(days=1)
-            break # Modul erfolgreich platziert, raus aus While, rein ins nächste For-Item
+            # Nächster Start: Montag nach Ende
+            naechster_moeglicher_start = get_next_monday(ende + timedelta(days=1))
+            break 
 
         if not moeglich: break
 
-    # --- ENDABRECHNUNG TEILZEIT ---
-    # Alles was noch auf dem Konto ist, muss hinten dran.
-    if moeglich and ist_teilzeit and tz_saldo >= 1:
-        tz_ende = naechster_moeglicher_start + timedelta(days=int(tz_saldo) - 1)
-        plan.append({
-            "Modul": "Teilzeit-Selbstlernphase (Abschluss)",
-            "Kuerzel": "TZ-LERNEN",
-            "Start": naechster_moeglicher_start,
-            "Ende": tz_ende,
-            "Wartetage_davor": 0,
-            "Kategorie": "Teilzeit"
-        })
+    # --- ENDABRECHNUNG TEILZEIT (REST) ---
+    if moeglich and ist_teilzeit and tz_saldo >= 4: # Nur wenn >= 1 Woche (Mo-Fr sind 5 Tage, wir brauchen ca 7 Tage Saldo für 1 Woche Pause)
+        
+        tz_start = naechster_moeglicher_start
+        target_end = tz_start + timedelta(days=int(tz_saldo))
+        tz_ende_fixed = get_previous_friday(target_end)
+        
+        if tz_ende_fixed >= tz_start:
+            plan.append({
+                "Modul": "Teilzeit-Selbstlernphase (Abschluss)",
+                "Kuerzel": "TZ-LERNEN",
+                "Start": tz_start,
+                "Ende": tz_ende_fixed,
+                "Wartetage_davor": 0,
+                "Kategorie": "Teilzeit"
+            })
 
     return moeglich, total_gap_days, plan, fehler_grund
 
@@ -276,8 +338,6 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
     return fehler_liste
 
 def bewertung_sortierung(plan_info):
-    # Bei der Bewertung ignorieren wir TZ-LERNEN Gaps nicht, 
-    # aber wir wollen primär Pläne, die funktionieren.
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     try:
         pmpx_index = echte_module.index(PRAXIS_MODUL)
