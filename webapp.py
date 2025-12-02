@@ -5,20 +5,29 @@ from datetime import timedelta, date
 import itertools
 import json
 import os
+import locale
 from streamlit_quill import st_quill
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
 
+# VERSUCH: Deutsche Locale setzen (für Wochentage etc.)
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
+except:
+    try:
+        locale.setlocale(locale.LC_ALL, 'de_DE') # Windows Fallback
+    except:
+        pass # Falls System kein Deutsch hat, Standard lassen
+
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
 ADMIN_PASSWORD = "mycarrEer.admin!186"
 
-# KORREKTUR: PSPO2 hängt jetzt von PSPO1 ab (und damit indirekt auch von PSM1)
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
-    "PSPO2": "PSPO1", # Geändert: Benötigt jetzt PSPO1
+    "PSPO2": "PSPO1", 
     "SPS": "PSM1",
     "PSK": "PSM1",
     "PAL-E": "PSM1",
@@ -249,7 +258,7 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
                 fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
     return fehler_liste
 
-# --- SCORE LOGIK ---
+# --- SCORE LOGIK (PRIO 1: KEINE LÜCKEN) ---
 def bewertung_sortierung(plan_info):
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
@@ -274,7 +283,6 @@ def bewertung_sortierung(plan_info):
     if "PSM1" in idx and "PSPO1" in idx:
         if idx["PSM1"] > idx["PSPO1"]: soft_score += 20
 
-    # Prio 1: Gaps, Prio 2: Soft Score
     return (plan_info['gaps'], soft_score, plan_info['switches'])
 
 # --- UI LOGIK ---
@@ -353,7 +361,12 @@ if uploaded_file:
         col1, col2 = st.columns(2)
         with col1:
             st.info("ℹ️ Datum ist Start des ERSTEN Fachmoduls.")
-            start_datum = st.date_input("Gewünschter Start Fachmodul", date(2026, 2, 9))
+            # HIER DIE ÄNDERUNG: Format auf Deutsch zwingen
+            start_datum = st.date_input(
+                "Gewünschter Start Fachmodul", 
+                value=date(2026, 2, 9),
+                format="DD.MM.YYYY"
+            )
         
         with col2:
             gewuenschte_module = st.multiselect("Fachmodule auswählen:", verfuegbare_module)
