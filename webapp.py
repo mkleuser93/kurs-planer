@@ -12,6 +12,7 @@ st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wi
 
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
+ADMIN_PASSWORD = "mycarrEer.admin!186"
 
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
@@ -247,7 +248,6 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
                 fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
     return fehler_liste
 
-# --- SCORE LOGIK ---
 def bewertung_sortierung(plan_info):
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
@@ -273,28 +273,51 @@ def bewertung_sortierung(plan_info):
 
 st.title("🎓 mycareernow Angebotsplaner")
 
-# --- SIDEBAR: TEXT EDITOR ---
+# --- SIDEBAR: LOGIN & EDITOR ---
 st.sidebar.header("📝 Texte verwalten")
-st.sidebar.info("Texte für HubSpot (inkl. Formatierung) hier einfügen.")
 
-all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
-for k_list in KATEGORIEN_MAPPING.values():
-    for k in k_list: all_known_kuerzel.add(k)
-all_known_kuerzel.add("B4.0")
-all_known_kuerzel.add("SELBSTLERN")
-all_known_kuerzel.add("TZ-LERNEN")
+# Session State initialisieren
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
 
-sorted_kuerzel = sorted(list(all_known_kuerzel))
+if not st.session_state.is_admin:
+    st.sidebar.info("🔒 Bearbeitung gesperrt")
+    password = st.sidebar.text_input("Admin-Passwort", type="password")
+    
+    if password:
+        if password == ADMIN_PASSWORD:
+            st.session_state.is_admin = True
+            st.rerun()
+        else:
+            st.sidebar.error("Falsches Passwort")
+else:
+    # --- ADMIN BEREICH (NUR SICHTBAR NACH LOGIN) ---
+    st.sidebar.success("🔓 Admin-Modus aktiv")
+    if st.sidebar.button("Logout"):
+        st.session_state.is_admin = False
+        st.rerun()
 
-selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
-current_texts = load_texts()
-current_text_value = current_texts.get(selected_modul, "")
+    st.sidebar.markdown("---")
+    st.sidebar.write("**Texte bearbeiten:**")
+    
+    all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
+    for k_list in KATEGORIEN_MAPPING.values():
+        for k in k_list: all_known_kuerzel.add(k)
+    all_known_kuerzel.add("B4.0")
+    all_known_kuerzel.add("SELBSTLERN")
+    all_known_kuerzel.add("TZ-LERNEN")
 
-new_text_html = st_quill(value=current_text_value, html=True, key=f"quill_{selected_modul}", placeholder="Text hier einfügen...")
+    sorted_kuerzel = sorted(list(all_known_kuerzel))
 
-if st.sidebar.button("💾 Text Speichern"):
-    save_text(selected_modul, new_text_html)
-    st.sidebar.success(f"Gespeichert: {selected_modul}")
+    selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
+    current_texts = load_texts()
+    current_text_value = current_texts.get(selected_modul, "")
+
+    new_text_html = st_quill(value=current_text_value, html=True, key=f"quill_{selected_modul}", placeholder="Hier formatierten Text aus HubSpot einfügen...")
+
+    if st.sidebar.button("💾 Text Speichern"):
+        save_text(selected_modul, new_text_html)
+        st.sidebar.success(f"Gespeichert: {selected_modul}")
 
 # --- HAUPTBEREICH ---
 
@@ -414,9 +437,6 @@ if uploaded_file:
                         # --- COPY BUTTON KOMPONENTE ---
                         st.subheader("📋 Angebot kopieren")
                         st.info("Klicke auf den Button, um die Textbausteine (mit Formatierung) in die Zwischenablage zu kopieren.")
-
-                        # Wir bauen eine HTML-Komponente mit integriertem Skript
-                        # Das ist der zuverlässigste Weg, um "formatierten" Text zu kopieren
                         
                         js_code = f"""
                         <div id="content-to-copy" style="border:1px solid #ddd; padding:10px; background:#f9f9f9; max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
@@ -445,8 +465,6 @@ if uploaded_file:
                         }}
                         </script>
                         """
-                        
-                        # Einbetten via components
                         components.html(js_code, height=400, scrolling=True)
 
     except Exception as e:
