@@ -6,12 +6,21 @@ import itertools
 import json
 import os
 import locale
+import requests  # NEU: Für den Download von GitHub
 from streamlit_quill import st_quill
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
 
-# Locale setzen (Versuch auf Deutsch für Wochentage)
+# !!! WICHTIG: HIER DEINEN GITHUB RAW LINK EINFÜGEN !!!
+# Anleitung: Öffne die Datei in GitHub -> Klicke auf den Button "Raw" -> Kopiere die URL aus dem Browser
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/mkleuser93/kurs-planer/refs/heads/main/modul_texte_backup.json"
+
+MAX_TEILNEHMER_PRO_KLASSE = 20
+TEXT_FILE = "modul_texte.json"
+ADMIN_PASSWORD = "mycarrEer.admin!186"
+
+# Locale setzen
 try:
     locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
 except:
@@ -20,9 +29,34 @@ except:
     except:
         pass
 
-MAX_TEILNEHMER_PRO_KLASSE = 20
-TEXT_FILE = "modul_texte.json"
-ADMIN_PASSWORD = "mycarrEer.admin!186"
+# --- INIT: TEXTE VON GITHUB LADEN (FALLS LOKAL NICHT VORHANDEN) ---
+def init_texts_from_github():
+    """
+    Versucht, die Texte von GitHub zu laden, wenn die lokale Datei fehlt.
+    Das passiert typischerweise nach einem Neustart des Servers.
+    """
+    if not os.path.exists(TEXT_FILE):
+        try:
+            # Wir prüfen, ob eine URL eingetragen wurde (nicht der Platzhalter)
+            if "DEIN_USER" in GITHUB_RAW_URL:
+                # Falls der User die URL noch nicht geändert hat, machen wir nichts Störendes,
+                # aber wir laden auch nichts.
+                pass
+            else:
+                response = requests.get(GITHUB_RAW_URL)
+                if response.status_code == 200:
+                    with open(TEXT_FILE, "w", encoding="utf-8") as f:
+                        f.write(response.text)
+                    # Optional: Toast-Nachricht, aber st.toast ist erst spät verfügbar.
+                    # Wir verlassen uns darauf, dass die Datei jetzt da ist.
+                else:
+                    print(f"Fehler beim Laden von GitHub: Status {response.status_code}")
+        except Exception as e:
+            print(f"GitHub Download Exception: {e}")
+
+# Führe die Initialisierung sofort aus
+init_texts_from_github()
+
 
 # --- ABHÄNGIGKEITEN ---
 ABHAENGIGKEITEN = {
@@ -71,7 +105,6 @@ def save_text(kuerzel, text):
     return data
 
 def save_all_texts_from_upload(uploaded_json):
-    """Überschreibt die lokale Datei mit dem Upload"""
     data = json.load(uploaded_json)
     with open(TEXT_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -323,11 +356,22 @@ if not st.session_state.is_admin:
 else:
     st.sidebar.success("🔓 Admin-Modus aktiv")
     
-    # --- IMPORT / EXPORT FUNKTION ---
-    st.sidebar.markdown("### 💾 Backup")
-    st.sidebar.info("Lade die Texte herunter, um sie zu sichern. Lade sie hoch, um sie wiederherzustellen.")
+    st.sidebar.markdown("### 💾 Backup & GitHub")
     
-    # Export
+    # 1. Info ob GitHub Link konfiguriert ist
+    if "DEIN_USER" in GITHUB_RAW_URL:
+        st.sidebar.warning("⚠️ GitHub-Link im Code nicht konfiguriert!")
+    else:
+        if st.sidebar.button("🔄 Texte neu von GitHub laden"):
+            try:
+                if os.path.exists(TEXT_FILE): os.remove(TEXT_FILE)
+                init_texts_from_github()
+                st.sidebar.success("Texte wurden neu von GitHub geladen!")
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"Fehler: {e}")
+
+    # 2. Manueller Download/Upload (für den User zum Sichern)
     current_texts_dict = load_texts()
     current_texts_json = json.dumps(current_texts_dict, indent=4, ensure_ascii=False)
     st.sidebar.download_button(
@@ -337,7 +381,6 @@ else:
         mime="application/json"
     )
 
-    # Import
     uploaded_config = st.sidebar.file_uploader("⬆️ Texte hochladen", type=["json"])
     if uploaded_config:
         try:
