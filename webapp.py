@@ -25,7 +25,6 @@ TEXT_FILE = "modul_texte.json"
 ADMIN_PASSWORD = "mycarrEer.admin!186"
 
 # --- ABHÄNGIGKEITEN ---
-# WICHTIG: 2wo_PMPX akzeptiert jetzt PSM1 ODER IPMA
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
@@ -35,7 +34,7 @@ ABHAENGIGKEITEN = {
     "PAL-E": "PSM1",
     "PAL-EBM": "PSM1",
     "AKI-EX": "AKI",
-    "2wo_PMPX": ("PSM1", "IPMA") # Tuple bedeutet: Eines von beiden reicht
+    "2wo_PMPX": ("PSM1", "IPMA") 
 }
 
 KATEGORIEN_MAPPING = {
@@ -71,6 +70,13 @@ def save_text(kuerzel, text):
         json.dump(data, f, ensure_ascii=False, indent=4)
     return data
 
+def save_all_texts_from_upload(uploaded_json):
+    """Überschreibt die lokale Datei mit dem Upload"""
+    data = json.load(uploaded_json)
+    with open(TEXT_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    return data
+
 # --- HELPER FUNKTIONEN (LOGIK) ---
 
 def get_next_monday(d):
@@ -82,7 +88,6 @@ def get_friday_of_week(monday_date, weeks_duration=1):
     return monday_date + timedelta(weeks=weeks_duration) - timedelta(days=3)
 
 def finde_naechsten_start(df, modul_kuerzel, ab_datum):
-    # Sicherstellen, dass wir ab einem Montag suchen
     ab_datum = get_next_monday(pd.to_datetime(ab_datum))
     
     if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
@@ -119,9 +124,8 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     
     # --- ONBOARDING (B4.0) ---
     if b40_aktiv:
-        # B4.0 findet am Freitag VOR dem Start statt
-        b40_start = current_monday - timedelta(days=3) 
-        b40_ende = b40_start 
+        b40_start = current_monday - timedelta(days=3) # Freitag
+        b40_ende = b40_start # 1 Tag
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -248,41 +252,29 @@ def ist_reihenfolge_gueltig(reihenfolge):
     for modul in reihenfolge:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
-            # Fall 1: OR-Logik (Tuple) - z.B. 2wo_PMPX braucht (PSM1, IPMA)
             if isinstance(voraussetzung, tuple):
-                # Es muss MINDESTENS EINES der Voraussetzungs-Module schon gesehen worden sein
                 erfuellt = any(v in gesehene_module for v in voraussetzung)
-                if not erfuellt:
-                    return False
-            
-            # Fall 2: Single-Logik (String) - z.B. PSPO1 braucht PSM1
+                if not erfuellt: return False
             elif isinstance(voraussetzung, str):
                 if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
                     return False
-                    
         gesehene_module.add(modul)
     return True
 
 def check_fehlende_voraussetzungen(gewuenschte_module):
     fehler_liste = []
     auswahl_set = set(gewuenschte_module)
-    
     for modul in gewuenschte_module:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
-            # Fall 1: OR-Logik (Tuple)
             if isinstance(voraussetzung, tuple):
-                # Prüfen, ob MINDESTENS EINES der benötigten Module ausgewählt wurde
                 erfuellt = any(v in auswahl_set for v in voraussetzung)
                 if not erfuellt:
                     optionen_str = " oder ".join(voraussetzung)
                     fehler_liste.append(f"Modul '{modul}' benötigt zwingend eines dieser Module: {optionen_str}")
-            
-            # Fall 2: Single-Logik (String)
             elif isinstance(voraussetzung, str):
                 if voraussetzung not in auswahl_set:
                     fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
-                    
     return fehler_liste
 
 # --- SCORE LOGIK (PRIO 1: KEINE LÜCKEN) ---
@@ -291,8 +283,6 @@ def bewertung_sortierung(plan_info):
     idx = {mod: i for i, mod in enumerate(echte_module)}
     
     soft_score = 0
-    
-    # PAL Logik
     pals = ["PAL-E", "PAL-EBM"]
     referenz_module_fuer_vorne = ["PSPO1", "2wo_PMPX"]
     for pal in pals:
@@ -301,24 +291,21 @@ def bewertung_sortierung(plan_info):
                 if ref in idx:
                     if idx[pal] < idx[ref]: soft_score += 50
     
-    # Late Bloomers
     late_bloomers = ["IT-TOOLS", "PAL-E", "PAL-EBM"]
     for l in late_bloomers:
         if l in idx: soft_score -= idx[l]
 
-    # PSM1 vor PSPO1
     if "PSM1" in idx and "PSPO1" in idx:
         if idx["PSM1"] > idx["PSPO1"]: soft_score += 20
 
-    # SORTIERSCHLÜSSEL: (Gaps, Soft-Score, Switches)
     return (plan_info['gaps'], soft_score, plan_info['switches'])
 
 # --- UI LOGIK ---
 
 st.title("🎓 mycareernow Angebotsplaner")
 
-# --- SIDEBAR: LOGIN & EDITOR ---
-st.sidebar.header("📝 Texte verwalten")
+# --- SIDEBAR: LOGIN & EDITOR & BACKUP ---
+st.sidebar.header("📝 Texte & Backup")
 
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
@@ -335,11 +322,37 @@ if not st.session_state.is_admin:
             st.sidebar.error("Falsches Passwort")
 else:
     st.sidebar.success("🔓 Admin-Modus aktiv")
+    
+    # --- IMPORT / EXPORT FUNKTION ---
+    st.sidebar.markdown("### 💾 Backup")
+    st.sidebar.info("Lade die Texte herunter, um sie zu sichern. Lade sie hoch, um sie wiederherzustellen.")
+    
+    # Export
+    current_texts_dict = load_texts()
+    current_texts_json = json.dumps(current_texts_dict, indent=4, ensure_ascii=False)
+    st.sidebar.download_button(
+        label="⬇️ Texte herunterladen (.json)",
+        data=current_texts_json,
+        file_name="modul_texte_backup.json",
+        mime="application/json"
+    )
+
+    # Import
+    uploaded_config = st.sidebar.file_uploader("⬆️ Texte hochladen", type=["json"])
+    if uploaded_config:
+        try:
+            save_all_texts_from_upload(uploaded_config)
+            st.sidebar.success("Texte erfolgreich geladen!")
+        except Exception as e:
+            st.sidebar.error(f"Fehler beim Laden: {e}")
+
+    st.sidebar.markdown("---")
     if st.sidebar.button("Logout"):
         st.session_state.is_admin = False
         st.rerun()
 
     st.sidebar.markdown("---")
+    st.sidebar.write("**Texte bearbeiten:**")
     
     all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
     for k_list in KATEGORIEN_MAPPING.values():
@@ -441,14 +454,25 @@ if uploaded_file:
                         gesamt_start = bester['plan'][0]['Start']
                         gesamt_ende = bester['plan'][-1]['Ende']
                         
-                        st.success(f"Angebot erstellt! (Gesamt: {gesamt_start.strftime('%d.%m.%Y')} - {gesamt_ende.strftime('%d.%m.%Y')})")
+                        st.success(f"Angebot erstellt!")
                         
                         if bester['gaps'] > 0:
                             st.warning(f"Achtung: Dieser Plan enthält insgesamt {bester['gaps']} Tage Lücke. (Bestes verfügbares Ergebnis)")
                         else:
                             st.info("✅ Dieser Plan ist vollständig lückenlos.")
 
+                        # --- KOMPAKTE ÜBERSICHT ---
+                        st.subheader("Übersicht (Kompakt)")
+                        col_sum1, col_sum2 = st.columns(2)
+                        col_sum1.markdown(f"**Start:** {gesamt_start.strftime('%d.%m.%Y')}")
+                        col_sum2.markdown(f"**Ende:** {gesamt_ende.strftime('%d.%m.%Y')}")
+                        
+                        ablauf_kuerzel = [item['Kuerzel'] for item in bester['plan']]
+                        ablauf_str = " -> ".join(ablauf_kuerzel)
+                        st.info(f"**Ablauf:** {ablauf_str}")
+                        
                         # --- TABELLE ZUR KONTROLLE ---
+                        st.markdown("---")
                         display_data = []
                         for item in bester['plan']:
                             start_str = item['Start'].strftime('%d.%m.%Y')
@@ -477,7 +501,6 @@ if uploaded_file:
                             beschreibung_html = TEXT_MAPPING.get(k, "")
                             
                             if not beschreibung_html:
-                                # Standard-Texte falls nicht definiert
                                 if k == "B4.0": beschreibung_html = "<p><strong>Bildung 4.0</strong><br>Einführung in den virtuellen Klassenraum.</p>"
                                 elif k == "SELBSTLERN": beschreibung_html = "<p><strong>Individuelle Selbstlernphase</strong></p>"
                                 elif k == "TZ-LERNEN": beschreibung_html = "<p><strong>Teilzeit-Selbstlernphase</strong></p>"
