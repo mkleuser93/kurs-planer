@@ -6,15 +6,14 @@ import itertools
 import json
 import os
 import locale
-import requests  # NEU: Für den Download von GitHub
+import requests
 from streamlit_quill import st_quill
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="mycareernow Planer", page_icon="📅", layout="wide")
 
-# !!! WICHTIG: HIER DEINEN GITHUB RAW LINK EINFÜGEN !!!
-# Anleitung: Öffne die Datei in GitHub -> Klicke auf den Button "Raw" -> Kopiere die URL aus dem Browser
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/mkleuser93/kurs-planer/refs/heads/main/modul_texte_backup.json"
+# HIER DEINEN GITHUB RAW LINK EINFÜGEN (Optional)
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/DEIN_USER/DEIN_REPO/main/modul_texte_backup.json"
 
 MAX_TEILNEHMER_PRO_KLASSE = 20
 TEXT_FILE = "modul_texte.json"
@@ -29,36 +28,22 @@ except:
     except:
         pass
 
-# --- INIT: TEXTE VON GITHUB LADEN (FALLS LOKAL NICHT VORHANDEN) ---
+# --- INIT TEXTE ---
 def init_texts_from_github():
-    """
-    Versucht, die Texte von GitHub zu laden, wenn die lokale Datei fehlt.
-    Das passiert typischerweise nach einem Neustart des Servers.
-    """
     if not os.path.exists(TEXT_FILE):
         try:
-            # Wir prüfen, ob eine URL eingetragen wurde (nicht der Platzhalter)
-            if "DEIN_USER" in GITHUB_RAW_URL:
-                # Falls der User die URL noch nicht geändert hat, machen wir nichts Störendes,
-                # aber wir laden auch nichts.
-                pass
-            else:
+            if "DEIN_USER" not in GITHUB_RAW_URL:
                 response = requests.get(GITHUB_RAW_URL)
                 if response.status_code == 200:
                     with open(TEXT_FILE, "w", encoding="utf-8") as f:
                         f.write(response.text)
-                    # Optional: Toast-Nachricht, aber st.toast ist erst spät verfügbar.
-                    # Wir verlassen uns darauf, dass die Datei jetzt da ist.
-                else:
-                    print(f"Fehler beim Laden von GitHub: Status {response.status_code}")
         except Exception as e:
-            print(f"GitHub Download Exception: {e}")
+            print(f"GitHub Error: {e}")
 
-# Führe die Initialisierung sofort aus
 init_texts_from_github()
 
-
 # --- ABHÄNGIGKEITEN ---
+# Tuple = ODER-Verknüpfung (Eines davon reicht)
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
@@ -89,7 +74,7 @@ for kat, module in KATEGORIEN_MAPPING.items():
 
 PRAXIS_MODUL = "2wo_PMPX"
 
-# --- HELPER FUNKTIONEN (TEXTE) ---
+# --- HELPER FUNKTIONEN ---
 
 def load_texts():
     if not os.path.exists(TEXT_FILE):
@@ -110,8 +95,6 @@ def save_all_texts_from_upload(uploaded_json):
         json.dump(data, f, ensure_ascii=False, indent=4)
     return data
 
-# --- HELPER FUNKTIONEN (LOGIK) ---
-
 def get_next_monday(d):
     wd = d.weekday() 
     if wd == 0: return d
@@ -120,20 +103,20 @@ def get_next_monday(d):
 def get_friday_of_week(monday_date, weeks_duration=1):
     return monday_date + timedelta(weeks=weeks_duration) - timedelta(days=3)
 
-def finde_naechsten_start(df, modul_kuerzel, ab_datum):
+def finde_naechsten_start(df, modul_kuerzel, ab_datum, ignore_capacity=False):
+    # Ab Datum auf nächsten Montag normalisieren
     ab_datum = get_next_monday(pd.to_datetime(ab_datum))
     
-    if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
-        moegliche_termine = df[
-            (df['Kuerzel'] == modul_kuerzel) & 
-            (df['Startdatum'] >= ab_datum) &
-            (df['Teilnehmeranzahl'] < (df['Klassenanzahl'] * MAX_TEILNEHMER_PRO_KLASSE))
-        ].sort_values(by='Startdatum')
-    else:
-        moegliche_termine = df[
-            (df['Kuerzel'] == modul_kuerzel) & 
-            (df['Startdatum'] >= ab_datum)
-        ].sort_values(by='Startdatum')
+    # Basis-Filter: Modul und Datum
+    mask = (df['Kuerzel'] == modul_kuerzel) & (df['Startdatum'] >= ab_datum)
+    
+    # Optional: Kapazitäts-Filter
+    if not ignore_capacity:
+        if 'Teilnehmeranzahl' in df.columns and 'Klassenanzahl' in df.columns:
+            # Nur Kurse, die nicht voll sind
+            mask = mask & (df['Teilnehmeranzahl'] < (df['Klassenanzahl'] * MAX_TEILNEHMER_PRO_KLASSE))
+    
+    moegliche_termine = df[mask].sort_values(by='Startdatum')
     
     if moegliche_termine.empty:
         return None
@@ -151,14 +134,14 @@ def berechne_kategorie_wechsel(plan):
         letzte_kat = aktuelle_kat
     return wechsel
 
-def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
+def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit, ignore_capacity):
     plan = []
     current_monday = get_next_monday(pd.to_datetime(start_wunsch))
     
-    # --- ONBOARDING (B4.0) ---
+    # --- ONBOARDING ---
     if b40_aktiv:
-        b40_start = current_monday - timedelta(days=3) # Freitag
-        b40_ende = b40_start # 1 Tag
+        b40_start = current_monday - timedelta(days=3)
+        b40_ende = b40_start
         plan.append({
             "Modul": "Bildung 4.0 - Virtual Classroom",
             "Kuerzel": "B4.0",
@@ -178,7 +161,7 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
     
     for i, modul in enumerate(modul_reihenfolge):
         while True:
-            kurs = finde_naechsten_start(df, modul, current_monday)
+            kurs = finde_naechsten_start(df, modul, current_monday, ignore_capacity)
             if kurs is None:
                 moeglich = False
                 fehler_grund = f"Kein freier Termin für '{modul}' ab {current_monday.strftime('%d.%m.%Y')} gefunden."
@@ -207,7 +190,6 @@ def berechne_plan(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit):
                         if weeks_to_take > 1: modul_counter = 0
                         current_monday = current_monday + timedelta(weeks=weeks_to_take)
                         continue
-
                 elif gap_weeks == 0 and modul_counter >= 2 and tz_guthaben_wochen >= 1:
                     weeks_to_take = min(int(tz_guthaben_wochen), 4)
                     if weeks_to_take >= 1:
@@ -310,84 +292,69 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
                     fehler_liste.append(f"Modul '{modul}' benötigt '{voraussetzung}'")
     return fehler_liste
 
-# --- SCORE LOGIK (PRIO 1: KEINE LÜCKEN) ---
+# --- SCORE LOGIK ---
 def bewertung_sortierung(plan_info):
     echte_module = [x['Kuerzel'] for x in plan_info['plan'] if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
     
     soft_score = 0
+    
+    # PAL sollte möglichst spät kommen (nach PMPX) -> PMPX Index < PAL Index ist gut.
+    # Wenn PAL < PMPX -> Schlecht (Punkte)
     pals = ["PAL-E", "PAL-EBM"]
-    referenz_module_fuer_vorne = ["PSPO1", "2wo_PMPX"]
+    refs = ["2wo_PMPX", "PSPO1"]
+    
     for pal in pals:
         if pal in idx:
-            for ref in referenz_module_fuer_vorne:
+            for ref in refs:
                 if ref in idx:
                     if idx[pal] < idx[ref]: soft_score += 50
     
-    late_bloomers = ["IT-TOOLS", "PAL-E", "PAL-EBM"]
-    for l in late_bloomers:
-        if l in idx: soft_score -= idx[l]
+    # Late Bloomers
+    late = ["IT-TOOLS", "PAL-E", "PAL-EBM"]
+    for l in late:
+        if l in idx: soft_score -= idx[l] # Je höher Index, desto besser
 
+    # PSM1 vor PSPO1
     if "PSM1" in idx and "PSPO1" in idx:
         if idx["PSM1"] > idx["PSPO1"]: soft_score += 20
 
     return (plan_info['gaps'], soft_score, plan_info['switches'])
 
-# --- UI LOGIK ---
-
+# --- UI ---
 st.title("🎓 mycareernow Angebotsplaner")
 
-# --- SIDEBAR: LOGIN & EDITOR & BACKUP ---
+# --- SIDEBAR ---
 st.sidebar.header("📝 Texte & Backup")
-
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
+if "is_admin" not in st.session_state: st.session_state.is_admin = False
 
 if not st.session_state.is_admin:
     st.sidebar.info("🔒 Bearbeitung gesperrt")
-    password = st.sidebar.text_input("Admin-Passwort", type="password")
-    
-    if password:
-        if password == ADMIN_PASSWORD:
+    if pwd := st.sidebar.text_input("Admin-Passwort", type="password"):
+        if pwd == ADMIN_PASSWORD:
             st.session_state.is_admin = True
             st.rerun()
-        elif password != "":
-            st.sidebar.error("Falsches Passwort")
+        else:
+            st.sidebar.error("Falsch")
 else:
-    st.sidebar.success("🔓 Admin-Modus aktiv")
+    st.sidebar.success("🔓 Admin-Modus")
     
-    st.sidebar.markdown("### 💾 Backup & GitHub")
-    
-    # 1. Info ob GitHub Link konfiguriert ist
-    if "DEIN_USER" in GITHUB_RAW_URL:
-        st.sidebar.warning("⚠️ GitHub-Link im Code nicht konfiguriert!")
+    if "DEIN_USER" in GITHUB_RAW_URL: st.sidebar.warning("⚠️ GitHub-Link prüfen!")
     else:
-        if st.sidebar.button("🔄 Texte neu von GitHub laden"):
+        if st.sidebar.button("🔄 GitHub neu laden"):
             try:
                 if os.path.exists(TEXT_FILE): os.remove(TEXT_FILE)
                 init_texts_from_github()
-                st.sidebar.success("Texte wurden neu von GitHub geladen!")
+                st.sidebar.success("Geladen!")
                 st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"Fehler: {e}")
+            except Exception as e: st.sidebar.error(f"{e}")
 
-    # 2. Manueller Download/Upload (für den User zum Sichern)
-    current_texts_dict = load_texts()
-    current_texts_json = json.dumps(current_texts_dict, indent=4, ensure_ascii=False)
-    st.sidebar.download_button(
-        label="⬇️ Texte herunterladen (.json)",
-        data=current_texts_json,
-        file_name="modul_texte_backup.json",
-        mime="application/json"
-    )
-
-    uploaded_config = st.sidebar.file_uploader("⬆️ Texte hochladen", type=["json"])
-    if uploaded_config:
-        try:
-            save_all_texts_from_upload(uploaded_config)
-            st.sidebar.success("Texte erfolgreich geladen!")
-        except Exception as e:
-            st.sidebar.error(f"Fehler beim Laden: {e}")
+    current = load_texts()
+    st.sidebar.download_button("⬇️ Backup (.json)", json.dumps(current, indent=4), "backup.json", "application/json")
+    
+    if up := st.sidebar.file_uploader("⬆️ Restore", ["json"]):
+        save_all_texts_from_upload(up)
+        st.sidebar.success("Wiederhergestellt!")
 
     st.sidebar.markdown("---")
     if st.sidebar.button("Logout"):
@@ -395,197 +362,112 @@ else:
         st.rerun()
 
     st.sidebar.markdown("---")
-    st.sidebar.write("**Texte bearbeiten:**")
+    all_k = set(ABHAENGIGKEITEN.keys())
+    for v in KATEGORIEN_MAPPING.values(): all_k.update(v)
+    all_k.update(["B4.0", "SELBSTLERN", "TZ-LERNEN"])
     
-    all_known_kuerzel = set(ABHAENGIGKEITEN.keys())
-    for k_list in KATEGORIEN_MAPPING.values():
-        for k in k_list: all_known_kuerzel.add(k)
-    all_known_kuerzel.add("B4.0")
-    all_known_kuerzel.add("SELBSTLERN")
-    all_known_kuerzel.add("TZ-LERNEN")
+    sel = st.sidebar.selectbox("Modul wählen:", sorted(all_k))
+    val = load_texts().get(sel, "")
+    new_html = st_quill(val, html=True, key=f"q_{sel}")
+    if st.sidebar.button("💾 Speichern"):
+        save_text(sel, new_html)
+        st.sidebar.success("Gespeichert")
 
-    sorted_kuerzel = sorted(list(all_known_kuerzel))
-
-    selected_modul = st.sidebar.selectbox("Modul wählen:", sorted_kuerzel)
-    current_texts = load_texts()
-    current_text_value = current_texts.get(selected_modul, "")
-
-    new_text_html = st_quill(value=current_text_value, html=True, key=f"quill_{selected_modul}", placeholder="Hier formatierten Text aus HubSpot einfügen...")
-
-    if st.sidebar.button("💾 Text Speichern"):
-        save_text(selected_modul, new_text_html)
-        st.sidebar.success(f"Gespeichert: {selected_modul}")
-
-# --- HAUPTBEREICH ---
-
+# --- MAIN ---
 st.write("Lade die Excel-Liste hoch.")
-uploaded_file = st.file_uploader("Kursdaten (Excel) hochladen", type=["xlsx", "csv"])
+up_file = st.file_uploader("Kursdaten (Excel)", ["xlsx", "csv"])
 
-if uploaded_file:
+if up_file:
     try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file, sep=';')
-        else:
-            xls = pd.ExcelFile(uploaded_file)
-            df = pd.read_excel(xls, sheet_name=0) 
-
+        if up_file.name.endswith('.csv'): df = pd.read_csv(up_file, sep=';')
+        else: df = pd.read_excel(up_file)
+        
         df.columns = [c.strip() for c in df.columns]
         df['Startdatum'] = pd.to_datetime(df['Startdatum'], dayfirst=True)
         df['Enddatum'] = pd.to_datetime(df['Enddatum'], dayfirst=True)
         df['Kuerzel'] = df['Kuerzel'].astype(str).str.strip()
         
-        if "Klassenanzahl" not in df.columns: df['Klassenanzahl'] = 1
-        else: df['Klassenanzahl'] = df['Klassenanzahl'].fillna(1).astype(int)
+        for c in ['Klassenanzahl', 'Teilnehmeranzahl']:
+            if c not in df.columns: df[c] = 0
+            df[c] = df[c].fillna(0).astype(int)
             
-        if "Teilnehmeranzahl" not in df.columns: df['Teilnehmeranzahl'] = 0
-        else: df['Teilnehmeranzahl'] = df['Teilnehmeranzahl'].fillna(0).astype(int)
-
-        verfuegbare_module = sorted(df['Kuerzel'].unique())
+        c1, c2 = st.columns(2)
+        with c1: start_d = st.date_input("Startdatum (Fachmodul)", date(2026, 2, 9), format="DD.MM.YYYY")
+        with c2: mods = st.multiselect("Module:", sorted(df['Kuerzel'].unique()))
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.info("ℹ️ Datum ist Start des ERSTEN Fachmoduls.")
-            start_datum = st.date_input(
-                "Gewünschter Start Fachmodul", 
-                value=date(2026, 2, 9),
-                format="DD.MM.YYYY"
-            )
-        
-        with col2:
-            gewuenschte_module = st.multiselect("Fachmodule auswählen:", verfuegbare_module)
-
         st.markdown("---")
-        
-        c1, c2, c3 = st.columns(3)
-        with c1: skip_b40 = st.checkbox("B4.0 überspringen")
-        with c2: ignore_deps = st.checkbox("Abhängigkeiten ignorieren")
-        with c3: is_teilzeit = st.checkbox("Teilzeit-Modell (50% mehr Zeit)")
+        c1, c2, c3, c4 = st.columns(4)
+        skip_b40 = c1.checkbox("Ohne B4.0")
+        ignore_dep = c2.checkbox("Abhängigkeiten ignorieren")
+        is_tz = c3.checkbox("Teilzeit")
+        ignore_cap = c4.checkbox("Teilnehmerzahl ignorieren", value=True, help="Bucht auch volle Kurse. Wichtig für lückenlose Planung!")
 
         if st.button("Angebot berechnen"):
-            if not gewuenschte_module:
-                st.warning("Bitte wähle mindestens ein Fachmodul aus.")
+            if not mods: st.warning("Keine Module gewählt.")
             else:
-                fehlende_voraussetzungen = check_fehlende_voraussetzungen(gewuenschte_module)
-                
-                if fehlende_voraussetzungen and not ignore_deps:
-                    st.error("❌ Fehlende Voraussetzungen!")
-                    for fehler in fehlende_voraussetzungen: st.write(f"- {fehler}")
-                    st.stop()
-                
-                if fehlende_voraussetzungen and ignore_deps:
-                    st.warning(f"Ignoriere Abhängigkeiten: {', '.join(fehlende_voraussetzungen)}")
-
-                with st.spinner("Berechne beste Kombination (Priorität: Lückenlosigkeit)..."):
-                    gueltige_plaene = []
+                errs = check_fehlende_voraussetzungen(mods)
+                if errs and not ignore_dep:
+                    st.error("Fehlende Voraussetzungen:")
+                    for e in errs: st.write(f"- {e}")
+                else:
+                    if errs: st.warning("Ignoriere Voraussetzungen.")
                     
-                    for reihenfolge in itertools.permutations(gewuenschte_module):
-                        if not ist_reihenfolge_gueltig(reihenfolge): continue
+                    with st.spinner("Rechne..."):
+                        plans = []
+                        for r in itertools.permutations(mods):
+                            if not ist_reihenfolge_gueltig(r): continue
+                            possible, gaps, p, _ = berechne_plan(df, r, pd.to_datetime(start_d), not skip_b40, is_tz, ignore_cap)
+                            if possible:
+                                sw = berechne_kategorie_wechsel(p)
+                                plans.append({"gaps": gaps, "switches": sw, "plan": p})
                         
-                        b40_aktiv = not skip_b40
-                        moeglich, gaps, plan, fehler = berechne_plan(df, reihenfolge, pd.to_datetime(start_datum), b40_aktiv, is_teilzeit)
-                        
-                        if moeglich:
-                            switches = berechne_kategorie_wechsel(plan)
-                            gueltige_plaene.append({"gaps": gaps, "switches": switches, "plan": plan})
-                    
-                    if not gueltige_plaene:
-                        st.error("Kein Plan möglich!")
-                    else:
-                        gueltige_plaene.sort(key=bewertung_sortierung)
-                        bester = gueltige_plaene[0]
-                        
-                        gesamt_start = bester['plan'][0]['Start']
-                        gesamt_ende = bester['plan'][-1]['Ende']
-                        
-                        st.success(f"Angebot erstellt!")
-                        
-                        if bester['gaps'] > 0:
-                            st.warning(f"Achtung: Dieser Plan enthält insgesamt {bester['gaps']} Tage Lücke. (Bestes verfügbares Ergebnis)")
+                        if not plans: st.error("Kein Plan möglich.")
                         else:
-                            st.info("✅ Dieser Plan ist vollständig lückenlos.")
-
-                        # --- KOMPAKTE ÜBERSICHT ---
-                        st.subheader("Übersicht (Kompakt)")
-                        col_sum1, col_sum2 = st.columns(2)
-                        col_sum1.markdown(f"**Start:** {gesamt_start.strftime('%d.%m.%Y')}")
-                        col_sum2.markdown(f"**Ende:** {gesamt_ende.strftime('%d.%m.%Y')}")
-                        
-                        ablauf_kuerzel = [item['Kuerzel'] for item in bester['plan']]
-                        ablauf_str = " -> ".join(ablauf_kuerzel)
-                        st.info(f"**Ablauf:** {ablauf_str}")
-                        
-                        # --- TABELLE ZUR KONTROLLE ---
-                        st.markdown("---")
-                        display_data = []
-                        for item in bester['plan']:
-                            start_str = item['Start'].strftime('%d.%m.%Y')
-                            ende_str = item['Ende'].strftime('%d.%m.%Y')
-                            hinweis = ""
-                            if item['Kuerzel'] == "SELBSTLERN": hinweis = "🔹 Lückenfüller"
-                            elif item['Kuerzel'] == "TZ-LERNEN": hinweis = "⏱️ Teilzeit-Lernen"
-                            elif item['Kuerzel'] == "B4.0": hinweis = "🚀 Onboarding"
-                            elif item['Wartetage_davor'] > 3: hinweis = f"⚠️ {item['Wartetage_davor']} Tage Gap"
+                            plans.sort(key=bewertung_sortierung)
+                            best = plans[0]
+                            st.success("Angebot erstellt!")
                             
-                            display_data.append({
-                                "Kategorie": item['Kategorie'],
-                                "Von": start_str,
-                                "Bis": ende_str,
-                                "Modul": item['Modul'],
-                                "Info": hinweis
-                            })
-                        st.table(display_data)
-
-                        # --- GENERIERUNG DES HTML-STRINGS FÜR DIE ZWISCHENABLAGE ---
-                        TEXT_MAPPING = load_texts()
-                        html_content_for_clipboard = ""
-
-                        for item in bester['plan']:
-                            k = item['Kuerzel']
-                            beschreibung_html = TEXT_MAPPING.get(k, "")
+                            if best['gaps'] > 0: st.warning(f"{best['gaps']} Lückentage.")
+                            else: st.info("✅ Lückenlos.")
                             
-                            if not beschreibung_html:
-                                if k == "B4.0": beschreibung_html = "<p><strong>Bildung 4.0</strong><br>Einführung in den virtuellen Klassenraum.</p>"
-                                elif k == "SELBSTLERN": beschreibung_html = "<p><strong>Individuelle Selbstlernphase</strong></p>"
-                                elif k == "TZ-LERNEN": beschreibung_html = "<p><strong>Teilzeit-Selbstlernphase</strong></p>"
-                                else: beschreibung_html = f"<p><em>Text für {k} fehlt.</em></p>"
+                            st.subheader("Übersicht")
+                            col1, col2 = st.columns(2)
+                            col1.markdown(f"**Start:** {best['plan'][0]['Start'].strftime('%d.%m.%Y')}")
+                            col2.markdown(f"**Ende:** {best['plan'][-1]['Ende'].strftime('%d.%m.%Y')}")
+                            st.info(" -> ".join([x['Kuerzel'] for x in best['plan']]))
                             
-                            html_content_for_clipboard += f"{beschreibung_html}<br>"
-
-                        # --- COPY BUTTON KOMPONENTE ---
-                        st.subheader("📋 Angebot kopieren")
-                        st.info("Klicke auf den Button, um die Textbausteine (mit Formatierung) in die Zwischenablage zu kopieren.")
-                        
-                        js_code = f"""
-                        <div id="content-to-copy" style="border:1px solid #ddd; padding:10px; background:#f9f9f9; max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
-                            {html_content_for_clipboard}
-                        </div>
-                        <button onclick="copyToClipboard()" style="background-color:#4CAF50; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px;">
-                           📋 In Zwischenablage kopieren
-                        </button>
-                        <script>
-                        function copyToClipboard() {{
-                            const node = document.getElementById('content-to-copy');
-                            const selection = window.getSelection();
-                            const range = document.createRange();
-                            range.selectNodeContents(node);
-                            selection.removeAllRanges();
-                            selection.addRange(range);
+                            # TABLE
+                            data = []
+                            for x in best['plan']:
+                                info = ""
+                                if x['Kuerzel'] == "SELBSTLERN": info = "🔹 Lücke"
+                                elif x['Wartetage_davor'] > 3: info = f"⚠️ {x['Wartetage_davor']} Tage Gap"
+                                data.append({"Modul": x['Modul'], "Von": x['Start'].strftime('%d.%m.%Y'), "Bis": x['Ende'].strftime('%d.%m.%Y'), "Info": info})
+                            st.table(data)
                             
-                            try {{
+                            # COPY
+                            txts = load_texts()
+                            html_clip = ""
+                            for x in best['plan']:
+                                t = txts.get(x['Kuerzel'], "")
+                                if not t: t = f"<p><strong>{x['Modul']}</strong></p>"
+                                html_clip += f"{t}<br>"
+                            
+                            st.subheader("📋 Copy für HubSpot")
+                            components.html(f"""
+                            <div id="copy_box" style="border:1px solid #ddd; padding:10px; height:200px; overflow:auto;">{html_clip}</div>
+                            <button onclick="copyIt()" style="margin-top:10px; padding:10px; background:#4CAF50; color:white; border:none; border-radius:4px; cursor:pointer;">Kopieren</button>
+                            <script>
+                            function copyIt() {{
+                                var r = document.createRange();
+                                r.selectNode(document.getElementById("copy_box"));
+                                window.getSelection().removeAllRanges();
+                                window.getSelection().addRange(r);
                                 document.execCommand('copy');
-                                alert('Erfolgreich kopiert! Du kannst es jetzt in HubSpot einfügen (Strg+V).');
-                            }} catch (err) {{
-                                alert('Fehler beim Kopieren: ' + err);
+                                window.getSelection().removeAllRanges();
+                                alert('Kopiert!');
                             }}
-                            
-                            selection.removeAllRanges();
-                        }}
-                        </script>
-                        """
-                        components.html(js_code, height=400, scrolling=True)
+                            </script>
+                            """, height=300)
 
-    except Exception as e:
-        st.error(f"Fehler: {e}")
-
-else:
-    st.info("Bitte lade zuerst die kursdaten.xlsx hoch.")
+    except Exception as e: st.error(f"Fehler: {e}")
