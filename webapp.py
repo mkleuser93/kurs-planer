@@ -47,7 +47,7 @@ init_texts_from_github()
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
-    "PSPO2": "PSPO1", # Änderung: Benötigt PSPO1
+    "PSPO2": "PSPO1", 
     "SPS": "PSM1",
     "PSK": "PSM1",
     "PAL-E": "PSM1",
@@ -55,6 +55,8 @@ ABHAENGIGKEITEN = {
     "AKI-EX": "AKI",
     "2wo_PMPX": ("PSM1", "IPMA") # PSM1 ODER IPMA
 }
+
+# HINWEIS: SQM vor PQM ist keine harte Abhängigkeit, sondern wird im Scoring gelöst.
 
 KATEGORIEN_MAPPING = {
     "Onboarding": ["B4.0"],
@@ -259,16 +261,11 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
 # --- SCORING SYSTEM ---
 def bewertung_sortierung(plan_info):
     """
-    Regelwerk:
-    1 Wechsel < 1 Lücke < 2 Wechsel
-    
-    Wir nutzen ein Penalty-System:
-    - Penalty pro Switch = 10
-    - Penalty pro Gap-Event = 15 (plus kleiner Zuschlag für Dauer)
-    
-    Beispiele:
-    1 Switch (10) vs 1 Gap (15) -> Switch gewinnt (kleinerer Score).
-    1 Gap (15) vs 2 Switches (20) -> Gap gewinnt.
+    PENALTY-SYSTEM:
+    - Switch = 10 Punkte
+    - Gap Event = 15 Punkte (Lücke vermeiden > Switch vermeiden)
+    - PQM vor SQM = 2 Punkte (Präferenz, aber untergeordnet)
+    - PMPX Position = 0.1 Punkte
     """
     
     # 1. Switches
@@ -278,27 +275,32 @@ def bewertung_sortierung(plan_info):
     # 2. Gaps
     gap_events = plan_info['gap_events']
     total_gap_weeks = plan_info['gap_weeks']
-    # Basisstrafe 15 pro Lücke + 1 pro Woche Dauer (damit kurze Lücken besser sind als lange)
     penalty_gaps = (gap_events * 15) + total_gap_weeks
     
-    # 3. Soft-Skills (PMPX Position etc.)
-    # Sollte nur greifen, wenn Score sonst identisch ist.
-    # Wir geben hier sehr kleine Strafen (< 1 Punkt), damit die Hauptlogik nicht gestört wird.
+    # 3. Soft-Skills
     soft_score = 0
     
     plan = plan_info['plan']
     echte_module = [x['Kuerzel'] for x in plan if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
     
-    # PMPX sollte spät kommen -> Strafe wenn andere PM Module danach kommen
+    # A) PMPX Position
     pm_module_refs = ["PSM1", "PSM2", "PSPO1", "PSPO2", "SPS", "PAL-E", "PAL-EBM", "PSK", "IPMA", "IT-TOOLS"]
     if PRAXIS_MODUL in idx:
         pmpx_pos = idx[PRAXIS_MODUL]
         for pm in pm_module_refs:
             if pm in idx:
                 if pmpx_pos < idx[pm]:
-                    soft_score += 0.1 # Minimaler Impact
+                    soft_score += 0.1 
     
+    # B) SQM vor PQM (NEU)
+    # Wenn PQM vor SQM kommt -> Strafe.
+    if "SQM" in idx and "PQM" in idx:
+        if idx["PQM"] < idx["SQM"]:
+            # Strafe muss kleiner sein als Switch (10) und Gap (15)
+            # Aber größer als PMPX-Positionierung (0.1)
+            soft_score += 2.0
+
     total_score = penalty_switches + penalty_gaps + soft_score
     return total_score
 
