@@ -43,7 +43,6 @@ def init_texts_from_github():
 init_texts_from_github()
 
 # --- ABHÄNGIGKEITEN ---
-# Tuple = ODER-Logik
 ABHAENGIGKEITEN = {
     "PSM2": "PSM1",
     "PSPO1": "PSM1", 
@@ -53,10 +52,8 @@ ABHAENGIGKEITEN = {
     "PAL-E": "PSM1",
     "PAL-EBM": "PSM1",
     "AKI-EX": "AKI",
-    "2wo_PMPX": ("PSM1", "IPMA") # PSM1 ODER IPMA
+    "2wo_PMPX": ("PSM1", "IPMA") 
 }
-
-# HINWEIS: SQM vor PQM ist keine harte Abhängigkeit, sondern wird im Scoring gelöst.
 
 KATEGORIEN_MAPPING = {
     "Onboarding": ["B4.0"],
@@ -109,7 +106,6 @@ def finde_naechsten_start(df, modul_kuerzel, ab_datum, ignore_capacity=False):
             def is_course_full(row):
                 klassen = row['Klassenanzahl']
                 teilnehmer = row['Teilnehmeranzahl']
-                # Wenn Klassenanzahl 0 oder leer -> Gehe von unbegrenzter Kapazität aus
                 if pd.isna(klassen) or klassen == 0: return False 
                 limit = klassen * MAX_TEILNEHMER_PRO_KLASSE
                 current = 0 if pd.isna(teilnehmer) else teilnehmer
@@ -128,7 +124,6 @@ def berechne_kategorie_wechsel(plan):
         if eintrag['Kuerzel'] in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]: continue
         kuerzel = eintrag['Kuerzel']
         aktuelle_kat = MODUL_ZU_KAT.get(kuerzel, "Sonstiges")
-        # Beim ersten Modul gibt es keinen Wechsel
         if letzte_kat is not None and aktuelle_kat != letzte_kat:
             wechsel += 1
         letzte_kat = aktuelle_kat
@@ -150,7 +145,7 @@ def berechne_plan_fuer_permutation(df, modul_reihenfolge, start_wunsch, b40_akti
         })
     
     total_gap_weeks = 0
-    gap_events = 0 # Anzahl der Lücken (unabhängig von Dauer)
+    gap_events = 0
     tz_guthaben_wochen = 0.0
     modul_counter = 0 
     
@@ -165,7 +160,6 @@ def berechne_plan_fuer_permutation(df, modul_reihenfolge, start_wunsch, b40_akti
         gap_days = (start - current_monday).days
         gap_weeks = gap_days // 7
         
-        # Lücken behandeln
         if gap_weeks >= 1:
             if ist_teilzeit and tz_guthaben_wochen >= 1:
                 weeks_to_take = min(gap_weeks, int(tz_guthaben_wochen))
@@ -184,10 +178,8 @@ def berechne_plan_fuer_permutation(df, modul_reihenfolge, start_wunsch, b40_akti
                 
             gap_weeks_rest = gap_days // 7
             if gap_weeks_rest >= 1:
-                # Hier entsteht eine echte Lücke ("SELBSTLERN")
                 gap_events += 1
                 total_gap_weeks += gap_weeks_rest
-                
                 sl_ende = get_friday_of_week(current_monday, gap_weeks_rest)
                 plan.append({
                     "Modul": "Indiv. Selbstlernphase",
@@ -199,7 +191,6 @@ def berechne_plan_fuer_permutation(df, modul_reihenfolge, start_wunsch, b40_akti
                 })
                 current_monday += timedelta(weeks=gap_weeks_rest)
 
-        # Modul eintragen
         plan.append({
             "Modul": kurs['Modulname'],
             "Kuerzel": modul,
@@ -235,10 +226,10 @@ def ist_reihenfolge_gueltig(reihenfolge):
     for modul in reihenfolge:
         voraussetzung = ABHAENGIGKEITEN.get(modul)
         if voraussetzung:
-            if isinstance(voraussetzung, tuple): # OR
+            if isinstance(voraussetzung, tuple):
                 if not any(v in gesehene_module for v in voraussetzung):
                     return False
-            elif isinstance(voraussetzung, str): # AND
+            elif isinstance(voraussetzung, str):
                 if voraussetzung in reihenfolge and voraussetzung not in gesehene_module:
                     return False
         gesehene_module.add(modul)
@@ -261,47 +252,56 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
 # --- SCORING SYSTEM ---
 def bewertung_sortierung(plan_info):
     """
-    PENALTY-SYSTEM:
-    - Switch = 10 Punkte
-    - Gap Event = 15 Punkte (Lücke vermeiden > Switch vermeiden)
-    - PQM vor SQM = 2 Punkte (Präferenz, aber untergeordnet)
-    - PMPX Position = 0.1 Punkte
+    SCORING UPDATE V42:
+    - Falsches Startmodul (wenn gewünscht): 2000 Punkte
+    - Switch: 10 Punkte
+    - Gap Event: 15 Punkte
+    - PQM < SQM: 2 Punkte
     """
+    
+    total_score = 0
+    
+    # 0. Startmodul Check (NEU)
+    wunsch_start = plan_info.get('wunsch_start')
+    plan = plan_info['plan']
+    # Suche das erste echte Modul (kein B4.0, kein Gap)
+    erstes_echtes_modul = None
+    for item in plan:
+        if item['Kuerzel'] not in ["B4.0", "SELBSTLERN", "TZ-LERNEN"]:
+            erstes_echtes_modul = item['Kuerzel']
+            break
+            
+    if wunsch_start and erstes_echtes_modul:
+        if erstes_echtes_modul != wunsch_start:
+            total_score += 2000 # Massive Strafe, damit es ganz unten landet
     
     # 1. Switches
     switches = plan_info['switches']
-    penalty_switches = switches * 10
+    total_score += (switches * 10)
     
     # 2. Gaps
     gap_events = plan_info['gap_events']
     total_gap_weeks = plan_info['gap_weeks']
-    penalty_gaps = (gap_events * 15) + total_gap_weeks
+    total_score += (gap_events * 15) + total_gap_weeks
     
     # 3. Soft-Skills
-    soft_score = 0
-    
-    plan = plan_info['plan']
     echte_module = [x['Kuerzel'] for x in plan if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
     
-    # A) PMPX Position
+    # PMPX Position
     pm_module_refs = ["PSM1", "PSM2", "PSPO1", "PSPO2", "SPS", "PAL-E", "PAL-EBM", "PSK", "IPMA", "IT-TOOLS"]
     if PRAXIS_MODUL in idx:
         pmpx_pos = idx[PRAXIS_MODUL]
         for pm in pm_module_refs:
             if pm in idx:
                 if pmpx_pos < idx[pm]:
-                    soft_score += 0.1 
+                    total_score += 0.1 
     
-    # B) SQM vor PQM (NEU)
-    # Wenn PQM vor SQM kommt -> Strafe.
+    # SQM vor PQM
     if "SQM" in idx and "PQM" in idx:
         if idx["PQM"] < idx["SQM"]:
-            # Strafe muss kleiner sein als Switch (10) und Gap (15)
-            # Aber größer als PMPX-Positionierung (0.1)
-            soft_score += 2.0
+            total_score += 2.0
 
-    total_score = penalty_switches + penalty_gaps + soft_score
     return total_score
 
 # --- UI ---
@@ -360,6 +360,18 @@ if up:
         with c2: mods = st.multiselect("Module", sorted(df['Kuerzel'].unique()))
         
         st.markdown("---")
+        
+        # NEUE FUNKTION: Startmodul Auswahl
+        wunsch_start_modul = None
+        use_start_modul = st.checkbox("🏁 Startmodul festlegen (Priorisiert)")
+        if use_start_modul:
+            if mods:
+                wunsch_start_modul = st.selectbox("Wähle das Startmodul:", mods)
+            else:
+                st.warning("Bitte erst Module oben auswählen.")
+
+        st.markdown("---")
+        
         c1, c2, c3, c4 = st.columns(4)
         skip_b40 = c1.checkbox("Ohne B4.0")
         ignore_dep = c2.checkbox("Abhängigkeiten ignorieren")
@@ -391,7 +403,8 @@ if up:
                                     "gap_weeks": gap_weeks, 
                                     "gap_events": gap_events,
                                     "switches": sw, 
-                                    "plan": p
+                                    "plan": p,
+                                    "wunsch_start": wunsch_start_modul # Info für Sortierung
                                 })
                         
                         if not plans: st.error("Kein Plan möglich.")
@@ -404,7 +417,7 @@ if up:
                             if best['gap_events'] == 0: 
                                 st.info("✅ Lückenlos!")
                             else: 
-                                st.warning(f"Plan enthält {best['gap_events']} Lücke(n) ({best['gap_weeks']} Wochen).")
+                                st.warning(f"Plan enthält {best['gap_events']} Lücke(n).")
                                 
                             s_date = best['plan'][0]['Start'].strftime('%d.%m.%Y')
                             e_date = best['plan'][-1]['Ende'].strftime('%d.%m.%Y')
