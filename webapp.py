@@ -73,7 +73,7 @@ for kat, module in KATEGORIEN_MAPPING.items():
 
 PRAXIS_MODUL = "2wo_PMPX"
 
-# --- HELPER FUNKTIONEN (Allgemein) ---
+# --- HELPER FUNKTIONEN ---
 
 def load_texts():
     if not os.path.exists(TEXT_FILE): return {}
@@ -96,64 +96,26 @@ def get_next_monday(d):
 def get_friday_of_week(monday_date, weeks_duration=1):
     return monday_date + timedelta(weeks=weeks_duration) - timedelta(days=3)
 
-# --- PERFORMANCE HELPER (NEU) ---
+def finde_naechsten_start(df, modul_kuerzel, ab_datum, ignore_capacity=False):
+    ab_datum = get_next_monday(pd.to_datetime(ab_datum))
+    mask = (df['Kuerzel'] == modul_kuerzel) & (df['Startdatum'] >= ab_datum)
+    df_filtered = df[mask].copy()
+    
+    if not ignore_capacity:
+        if 'Teilnehmeranzahl' in df_filtered.columns and 'Klassenanzahl' in df_filtered.columns:
+            def is_course_full(row):
+                klassen = row['Klassenanzahl']
+                teilnehmer = row['Teilnehmeranzahl']
+                if pd.isna(klassen) or klassen == 0: return False 
+                limit = klassen * MAX_TEILNEHMER_PRO_KLASSE
+                current = 0 if pd.isna(teilnehmer) else teilnehmer
+                return current >= limit
 
-def create_course_index(df):
-    """
-    Wandelt den DataFrame in ein Dictionary um.
-    Struktur: { 'PSK': [ {Start:..., Ende:..., IsFull:...}, ...sortiert... ], ... }
-    Das beschleunigt den Zugriff von O(N) auf O(1).
-    """
-    index = {}
-    
-    # Vorab-Berechnung der Auslastung für jede Zeile
-    def check_full(row):
-        k = row.get('Klassenanzahl', 0)
-        t = row.get('Teilnehmeranzahl', 0)
-        if pd.isna(k) or k == 0: return False
-        limit = k * MAX_TEILNEHMER_PRO_KLASSE
-        curr = 0 if pd.isna(t) else t
-        return curr >= limit
+            df_filtered['is_full'] = df_filtered.apply(is_course_full, axis=1)
+            df_filtered = df_filtered[~df_filtered['is_full']]
 
-    # Konvertierung zu Dict records
-    records = df.to_dict('records')
-    
-    for row in records:
-        k = str(row['Kuerzel']).strip()
-        if k not in index:
-            index[k] = []
-        
-        # Datensatz bereinigen und hinzufügen
-        entry = {
-            'Startdatum': row['Startdatum'],
-            'Enddatum': row['Enddatum'],
-            'Modulname': row['Modulname'],
-            'is_full': check_full(row)
-        }
-        index[k].append(entry)
-        
-    # Sortieren pro Modul nach Datum
-    for k in index:
-        index[k].sort(key=lambda x: x['Startdatum'])
-        
-    return index
-
-def find_next_course_fast(course_index, modul_kuerzel, ab_datum, ignore_capacity=False):
-    """
-    Sucht im Index statt im DataFrame. Extrem schnell.
-    """
-    target_date = get_next_monday(pd.to_datetime(ab_datum))
-    
-    candidates = course_index.get(modul_kuerzel, [])
-    
-    for course in candidates:
-        # 1. Datums-Check
-        if course['Startdatum'] >= target_date:
-            # 2. Kapazitäts-Check
-            if ignore_capacity or not course['is_full']:
-                return course
-                
-    return None
+    if df_filtered.empty: return None
+    return df_filtered.sort_values(by='Startdatum').iloc[0]
 
 def berechne_kategorie_wechsel(plan):
     wechsel = 0
@@ -167,10 +129,7 @@ def berechne_kategorie_wechsel(plan):
         letzte_kat = aktuelle_kat
     return wechsel
 
-def berechne_plan_fuer_permutation_fast(course_index, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit, ignore_capacity):
-    """
-    Nutzt den schnellen Index statt DataFrame.
-    """
+def berechne_plan_fuer_permutation(df, modul_reihenfolge, start_wunsch, b40_aktiv, ist_teilzeit, ignore_capacity):
     plan = []
     current_monday = get_next_monday(pd.to_datetime(start_wunsch))
     
@@ -191,8 +150,7 @@ def berechne_plan_fuer_permutation_fast(course_index, modul_reihenfolge, start_w
     modul_counter = 0 
     
     for modul in modul_reihenfolge:
-        # HIER IST DER UNTERSCHIED: Fast Lookup
-        kurs = find_next_course_fast(course_index, modul, current_monday, ignore_capacity)
+        kurs = finde_naechsten_start(df, modul, current_monday, ignore_capacity)
         
         if kurs is None:
             return False, 0, 0, [], f"Kein Termin für {modul}"
@@ -293,11 +251,20 @@ def check_fehlende_voraussetzungen(gewuenschte_module):
 
 # --- SCORING SYSTEM ---
 def bewertung_sortierung(plan_info):
+    """
+    SCORING UPDATE V42:
+    - Falsches Startmodul (wenn gewünscht): 2000 Punkte
+    - Switch: 10 Punkte
+    - Gap Event: 15 Punkte
+    - PQM < SQM: 2 Punkte
+    """
+    
     total_score = 0
     
-    # 0. Startmodul Check
+    # 0. Startmodul Check (NEU)
     wunsch_start = plan_info.get('wunsch_start')
     plan = plan_info['plan']
+    # Suche das erste echte Modul (kein B4.0, kein Gap)
     erstes_echtes_modul = None
     for item in plan:
         if item['Kuerzel'] not in ["B4.0", "SELBSTLERN", "TZ-LERNEN"]:
@@ -306,7 +273,7 @@ def bewertung_sortierung(plan_info):
             
     if wunsch_start and erstes_echtes_modul:
         if erstes_echtes_modul != wunsch_start:
-            total_score += 2000 
+            total_score += 2000 # Massive Strafe, damit es ganz unten landet
     
     # 1. Switches
     switches = plan_info['switches']
@@ -321,6 +288,7 @@ def bewertung_sortierung(plan_info):
     echte_module = [x['Kuerzel'] for x in plan if x['Kuerzel'] not in ["SELBSTLERN", "B4.0", "TZ-LERNEN"]]
     idx = {mod: i for i, mod in enumerate(echte_module)}
     
+    # PMPX Position
     pm_module_refs = ["PSM1", "PSM2", "PSPO1", "PSPO2", "SPS", "PAL-E", "PAL-EBM", "PSK", "IPMA", "IT-TOOLS"]
     if PRAXIS_MODUL in idx:
         pmpx_pos = idx[PRAXIS_MODUL]
@@ -329,6 +297,7 @@ def bewertung_sortierung(plan_info):
                 if pmpx_pos < idx[pm]:
                     total_score += 0.1 
     
+    # SQM vor PQM
     if "SQM" in idx and "PQM" in idx:
         if idx["PQM"] < idx["SQM"]:
             total_score += 2.0
@@ -336,7 +305,7 @@ def bewertung_sortierung(plan_info):
     return total_score
 
 # --- UI ---
-st.title("🎓 mycareernow Angebotsplaner (High Speed)")
+st.title("🎓 mycareernow Angebotsplaner")
 
 st.sidebar.header("📝 Texte & Backup")
 if "is_admin" not in st.session_state: st.session_state.is_admin = False
@@ -386,15 +355,13 @@ if up:
             if c not in df.columns: df[c] = 0
             df[c] = df[c].fillna(0).astype(int)
 
-        # INDEX ERSTELLEN (DAS IST DER TURBO)
-        course_index = create_course_index(df)
-
         c1, c2 = st.columns(2)
         with c1: start_d = st.date_input("Startdatum", date(2026, 2, 9), format="DD.MM.YYYY")
         with c2: mods = st.multiselect("Module", sorted(df['Kuerzel'].unique()))
         
         st.markdown("---")
         
+        # NEUE FUNKTION: Startmodul Auswahl
         wunsch_start_modul = None
         use_start_modul = st.checkbox("🏁 Startmodul festlegen (Priorisiert)")
         if use_start_modul:
@@ -404,6 +371,7 @@ if up:
                 st.warning("Bitte erst Module oben auswählen.")
 
         st.markdown("---")
+        
         c1, c2, c3, c4 = st.columns(4)
         skip_b40 = c1.checkbox("Ohne B4.0")
         ignore_dep = c2.checkbox("Abhängigkeiten ignorieren")
@@ -419,15 +387,14 @@ if up:
                 else:
                     if errs: st.warning("Ignoriere Voraussetzungen.")
                     
-                    with st.spinner("Simuliere (Turbo-Modus)..."):
+                    with st.spinner("Simuliere alle Kombinationen..."):
                         plans = []
-                        # Wir nutzen den Index für die Suche
                         for r in itertools.permutations(mods):
                             if not ignore_dep and not ist_reihenfolge_gueltig(r):
                                 continue
                             
-                            poss, gap_weeks, gap_events, p, _ = berechne_plan_fuer_permutation_fast(
-                                course_index, r, pd.to_datetime(start_d), not skip_b40, is_tz, ignore_cap
+                            poss, gap_weeks, gap_events, p, _ = berechne_plan_fuer_permutation(
+                                df, r, pd.to_datetime(start_d), not skip_b40, is_tz, ignore_cap
                             )
                             
                             if poss:
@@ -437,7 +404,7 @@ if up:
                                     "gap_events": gap_events,
                                     "switches": sw, 
                                     "plan": p,
-                                    "wunsch_start": wunsch_start_modul
+                                    "wunsch_start": wunsch_start_modul # Info für Sortierung
                                 })
                         
                         if not plans: st.error("Kein Plan möglich.")
